@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Runtime data (keep folder, ignore contents)
+data/cache/*
+!data/cache/.gitkeep
+data/memory/*
+!data/memory/.gitkeep
+*.sqlite
+
+# OS
+.DS_Store
