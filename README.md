@@ -29,24 +29,33 @@ Built in plain Python for the AAI-520 Natural Language Processing and GenAI cour
 
 ## How it works
 
-A **Planner** turns the question into ordered research steps. A **Router** sends each step to one of three specialist agents, which call data tools. A **Draft writer** merges their findings, and a **Critic–Refiner** loop must pass the draft before it is released. Lessons from each run are saved so later runs plan better.
+The **Orchestrator** is the controller that runs every request. It is a plain Python class that calls each agent in order, passes results between them through a shared state object (plan, evidence from every tool call, findings, drafts, critiques and a trace log), and records every step. It makes no LLM calls itself; the agents do.
+
+Inside it, a **Planner** turns the question into ordered research steps. A **Router** sends each step to one of three specialist agents, which call data tools. A **Draft writer** merges their findings, and a **Critic–Refiner** loop must pass the draft before it is released. Notes and lessons from each run are saved to long-term memory so later runs plan better.
 
 ```mermaid
 flowchart TD
-    U[Ticker + question] --> P[Planner]
-    M[(Long-term memory)] --> P
-    P --> R[Router]
-    R --> E[Earnings analyst]
-    R --> N[News analyst]
-    R --> K[Market analyst]
-    E --> W[Draft writer]
-    N --> W
-    K --> W
-    W --> C{Critic}
-    C -- needs work --> F[Refiner]
-    F --> C
-    C -- passes --> B[Final research brief]
-    B -- save notes and lessons --> M
+    S["ResearchSession<br/>notebook · CLI · chat UI"] -- ticker + question --> O
+
+    subgraph O["Orchestrator · plain Python · runs each step in order and holds the shared state"]
+        direction TB
+        P[Planner] --> R[Router]
+        R --> E[Earnings analyst]
+        R --> N[News analyst]
+        R --> K[Market analyst]
+        E --> W[Draft writer]
+        N --> W
+        K --> W
+        W --> C{Critic}
+        C -- needs work --> F[Refiner]
+        F --> C
+    end
+
+    O <-- tool calls --> T[("Tool registry<br/>yfinance · NewsAPI · FRED · EDGAR")]
+    O <-- "read notes / save lessons" --> M[("Long-term memory")]
+    O -- passes review --> B[Final research brief]
+
+    style O fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px
 ```
 
 The system has six layers, and each layer only calls the one below it:
@@ -55,7 +64,7 @@ The system has six layers, and each layer only calls the one below it:
 | --- | --- |
 | 1. Interfaces | Jupyter notebook, command line, Gradio chat UI |
 | 2. Session | `ResearchSession`: conversation state and context cache per thread |
-| 3. Orchestration | Planner, Router, Critic + Refiner loop |
+| 3. Orchestration | Orchestrator (control loop + shared state), Planner, Router, Critic + Refiner loop |
 | 4. Specialist agents | Earnings, News and Market analysts |
 | 5. Tools | Market data, news and macro data, company filings |
 | 6. Storage | Response cache, long-term memory, session store |
