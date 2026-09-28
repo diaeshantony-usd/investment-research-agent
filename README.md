@@ -6,7 +6,7 @@ Built in plain Python for the AAI-520 Natural Language Processing and GenAI cour
 
 > **Status:** project scaffold. Folders are in place; code is being added over the build phases below.
 
-📄 **Detailed design document:** [Multi-Agent Investment Research System — Design Doc](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?tab=t.0)
+📄 **Detailed design document:** [Multi-Agent Investment Research System — Design Doc](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?usp=sharing)
 
 ---
 
@@ -240,7 +240,7 @@ The `BaseAgent` interface and shared state format are agreed in Phase 1 so all t
 
 ## Further reading
 
-The full design, including all diagrams, the Critic and Refiner specification and the evaluation plan, is in the [detailed design document](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?tab=t.0).
+The full design, including all diagrams, the Critic and Refiner specification and the evaluation plan, is in the [detailed design document](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?usp=sharing).
 
 ---
 
