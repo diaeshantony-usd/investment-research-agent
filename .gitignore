@@ -8,16 +8,27 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+*.egg-info/
 
 # Jupyter
 .ipynb_checkpoints/
+*/.ipynb_checkpoints/*
 
-# Runtime data (keep folder, ignore contents)
-data/cache/*
-!data/cache/.gitkeep
-data/memory/*
-!data/memory/.gitkeep
+# Logs
+logs/
+*.log
+
+# Runtime Memory & Cache (.json files)
+data/memory/*.json
+data/cache/*.json
 *.sqlite
 
-# OS
+# OS & Editors
 .DS_Store
+.vscode/
+
+# Local Dev Scripts
+scripts/
+
+

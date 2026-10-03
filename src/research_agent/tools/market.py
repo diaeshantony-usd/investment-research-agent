@@ -1,0 +1,73 @@
+"""
+tools/market.py
+===============
+Tool for retrieving market technicals, price action, moving averages, and indicators.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from research_agent.agent_framework import tool
+from research_agent.config import logger
+
+_MARKET_DATABASE: dict[str, dict[str, Any]] = {
+    "NVDA": {
+        "current_price": "$138.50",
+        "52_week_high": "$140.76",
+        "52_week_low": "$45.11",
+        "50_day_sma": "$126.80",
+        "200_day_sma": "$102.40",
+        "rsi_14": "61.4",
+        "beta": "1.68",
+        "trend": "Bullish Uptrend",
+    },
+    "AAPL": {
+        "current_price": "$224.20",
+        "52_week_high": "$237.23",
+        "52_week_low": "$164.08",
+        "50_day_sma": "$218.40",
+        "200_day_sma": "$195.10",
+        "rsi_14": "54.8",
+        "beta": "1.02",
+        "trend": "Moderate Uptrend",
+    },
+    "MSFT": {
+        "current_price": "$428.90",
+        "52_week_high": "$468.35",
+        "52_week_low": "$327.00",
+        "50_day_sma": "$435.10",
+        "200_day_sma": "$412.50",
+        "rsi_14": "48.2",
+        "beta": "1.15",
+        "trend": "Consolidation",
+    },
+}
+
+
+@tool(
+    name="get_market_technicals",
+    description="Retrieves technical price action, moving averages (SMA 50/200), RSI, and trend metrics.",
+)
+def get_market_technicals(ticker: str) -> str:
+    """Returns price action and technical indicators for a given stock ticker.
+
+    Args:
+        ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
+    """
+    clean_ticker = (ticker or "").strip().upper()
+    logger.info(f"Executing get_market_technicals for ticker: {clean_ticker}")
+
+    data = _MARKET_DATABASE.get(clean_ticker)
+    if data:
+        payload = {"ticker": clean_ticker, **data}
+        return json.dumps(payload, indent=2)
+
+    logger.warning(f"No market technicals found for ticker: {clean_ticker}")
+    return json.dumps(
+        {
+            "ticker": clean_ticker,
+            "error": f"No technical data available for '{clean_ticker}'",
+        }
+    )
