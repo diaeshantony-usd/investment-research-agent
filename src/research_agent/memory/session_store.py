@@ -298,7 +298,8 @@ class SessionStore:
             (thread_id, now, now),
         )
         record = self.get_thread(thread_id)
-        assert record is not None  # just inserted or already present
+        if record is None:  # pragma: no cover - only if the row vanished concurrently
+            raise RuntimeError(f"Thread '{thread_id}' could not be created")
         return record
 
     def get_thread(self, thread_id: str) -> ThreadRecord | None:
@@ -324,7 +325,7 @@ class SessionStore:
         # Column names come from the allow-list above, never from user input.
         assignments = ", ".join(f"{name} = ?" for name in fields)
         self._query(
-            f"UPDATE threads SET {assignments}, updated_at = ? WHERE thread_id = ?",
+            f"UPDATE threads SET {assignments}, updated_at = ? WHERE thread_id = ?",  # noqa: S608
             (*fields.values(), _utc_now(), thread_id),
         )
 

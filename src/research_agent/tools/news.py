@@ -50,22 +50,28 @@ _NEWS_DATABASE: dict[str, list[dict[str, Any]]] = {
 
 @tool(
     name="get_news_data",
-    description="Retrieves recent news headlines, publication dates, and catalyst summaries for a stock.",
+    description=(
+        "Retrieves recent news headlines, publication dates, and catalyst summaries for a stock."
+    ),
 )
 def get_news_data(ticker: str) -> str:
     """Returns curated news headlines and sentiment signals for a given ticker.
 
     Args:
         ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
+
+    Returns:
+        JSON with an ``articles`` list (headline, source, date, sentiment,
+        summary); the list is empty when no news is available.
     """
     clean_ticker = (ticker or "").strip().upper()
-    logger.info(f"Executing get_news_data for ticker: {clean_ticker}")
+    logger.info("Executing get_news_data for ticker: %s", clean_ticker)
 
     articles = _NEWS_DATABASE.get(clean_ticker)
     if articles:
         return json.dumps({"ticker": clean_ticker, "articles": articles}, indent=2)
 
-    logger.warning(f"No news found for ticker: {clean_ticker}")
+    logger.warning("No news found for ticker: %s", clean_ticker)
     return json.dumps(
         {
             "ticker": clean_ticker,

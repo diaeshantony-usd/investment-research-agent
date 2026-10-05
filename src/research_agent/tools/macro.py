@@ -25,13 +25,22 @@ _MACRO_DATA: dict[str, Any] = {
 
 @tool(
     name="get_macro_indicators",
-    description="Retrieves US macroeconomic indicators including 10-year treasury yields, CPI, and Fed rates.",
+    description=(
+        "Retrieves US macroeconomic indicators including 10-year treasury yields, CPI, and Fed "
+        "rates."
+    ),
 )
 def get_macro_indicators(category: str = "all") -> str:
     """Returns macroeconomic indicators and monetary policy backdrop.
 
     Args:
-        category: Filter category or 'all'.
+        category: One indicator key (e.g. ``'cpi_yoy'``) or ``'all'``. Unknown values
+            return every indicator, so a loosely worded request still gets data.
+
+    Returns:
+        JSON with the requested indicator, or all indicators.
     """
-    logger.info(f"Executing get_macro_indicators [category={category}]")
+    logger.info("Executing get_macro_indicators [category=%s]", category)
+    if category in _MACRO_DATA:
+        return json.dumps({category: _MACRO_DATA[category]}, indent=2)
     return json.dumps(_MACRO_DATA, indent=2)

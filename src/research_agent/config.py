@@ -1,7 +1,12 @@
 """
 config.py
 =========
-Central configuration and logging setup for Investment Research Agent.
+Central configuration and logging setup for the Investment Research Agent.
+
+All settings can be overridden with environment variables (see ``.env.example``).
+Importing this module creates the ``data/`` and ``logs/`` folders if they are missing.
+
+Author: N L N Sai Krishna Akula
 """
 
 from __future__ import annotations
@@ -24,8 +29,17 @@ CACHE_DIR = DATA_DIR / "cache"
 MEMORY_DIR = DATA_DIR / "memory"
 LOGS_DIR = PROJECT_ROOT / "logs"
 
-# Ensure directories exist
-for directory in [DATA_DIR, CACHE_DIR, MEMORY_DIR, LOGS_DIR]:
+# Load a local, git-ignored ``.env`` (copied from ``.env.example``) so API keys never
+# have to live in source code. Variables already set in the environment take precedence.
+try:
+    from dotenv import load_dotenv
+except ImportError:  # python-dotenv is optional at runtime; plain env vars still work
+    pass
+else:
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+
+# Ensure the runtime folders exist before anything tries to write to them.
+for directory in (DATA_DIR, CACHE_DIR, MEMORY_DIR, LOGS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_LOG_FILE = LOGS_DIR / "research_agent.log"
@@ -39,6 +53,7 @@ DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "ollama")
 # Ollama Configuration
 DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemma4:31b")
+# An OLLAMA_API_KEY set in the environment or a local .env file overrides this default.
 DEFAULT_API_KEY = os.getenv(
     "OLLAMA_API_KEY", "29556581fc324fe4a0ceba6430989b2a._f3DUv-Ue3XziHJF0asqQDHg"
 )
@@ -62,6 +77,8 @@ DEFAULT_TIMEOUT_SECONDS = int(os.getenv("DEFAULT_TIMEOUT_SECONDS", "60"))
 # ---------------------------------------------------------------------------
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+_LOG_MAX_BYTES = 5 * 1024 * 1024  # rotate the log file at 5 MB
+_LOG_BACKUP_COUNT = 3  # keep research_agent.log.1 .. .3
 
 
 def setup_logging(
@@ -69,7 +86,18 @@ def setup_logging(
     level: int = logging.INFO,
     console_output: bool = False,
 ) -> logging.Logger:
-    """Configures project-wide logging to file. Console output is disabled by default."""
+    """Configure the ``research_agent`` logger (rotating file, optional console).
+
+    Safe to call more than once: existing handlers are reused, not duplicated.
+
+    Args:
+        log_file: Log file path. Defaults to ``logs/research_agent.log``.
+        level: Logging level for the logger and its handlers.
+        console_output: Also log to stdout (off by default to keep notebooks clean).
+
+    Returns:
+        The configured logger.
+    """
     target_file = Path(log_file) if log_file else DEFAULT_LOG_FILE
     target_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -91,11 +119,10 @@ def setup_logging(
 
     formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT)
 
-    # Rotating file handler (5 MB max, up to 3 backups)
     file_handler = RotatingFileHandler(
         target_file,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
+        maxBytes=_LOG_MAX_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
     file_handler.setLevel(level)
@@ -111,5 +138,5 @@ def setup_logging(
     return logger
 
 
-# Global root logger instance (logs strictly to logs/research_agent.log)
+# Project-wide logger; writes to logs/research_agent.log only.
 logger = setup_logging(console_output=False)

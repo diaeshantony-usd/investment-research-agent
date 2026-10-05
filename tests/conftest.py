@@ -53,7 +53,10 @@ def mock_llm() -> MockLLM:
 
 @pytest.fixture
 def temp_memory_file():
-    """Provides an isolated temporary JSON file path without Windows pytest temp permission issues."""
+    """Provide an isolated temporary JSON file path.
+
+    Uses ``tempfile`` rather than ``tmp_path`` to avoid Windows temp-permission issues.
+    """
     td = tempfile.mkdtemp(prefix="agent_mem_test_")
     filepath = Path(td) / "test_memory.json"
     yield str(filepath)

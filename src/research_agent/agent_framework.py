@@ -3,13 +3,20 @@ agent_framework.py
 ==================
 Modular, state-driven multi-agent orchestration framework.
 
-Key Architectural Foundations:
-- Tool & Reflection: Wraps Python functions with JSON schema serialization and safe execution.
-- Agent Runtime: Autonomous execution loop with chain-of-thought, tool invocation, and memory tracking.
-- State Blackboard: GraphState captures shared workflow state, agent outputs, and tool observations.
-- Checkpoint Memory: GraphMemory provides disk and in-memory persistence with pagination.
-- Graph Orchestration: StateGraph compiles nodes, linear edges, conditional routing, and parallel execution.
-- Observability: Complete execution trajectory capture with console and Markdown visualizers.
+Key architectural pieces:
+
+- **Tool**: wraps a Python function with metadata and safe execution, so a failing tool
+  returns an error string the LLM can react to instead of crashing the run.
+- **Agent**: a ReAct loop (reason, call tools, observe) with a bounded iteration count.
+- **GraphState**: the shared "blackboard" passed between nodes (agent outputs, tool
+  observations, trajectory).
+- **GraphMemory**: JSON checkpoint store of finished runs, grouped by ``thread_id``.
+- **StateGraph / CompiledStateGraph**: nodes, fixed edges, conditional routing and
+  sequential "parallel" groups, compiled into an executable workflow.
+- **Observability**: every step is recorded in ``GraphState.trajectory`` and can be
+  rendered as a Markdown or ASCII table.
+
+Author: N L N Sai Krishna Akula
 """
 
 from __future__ import annotations
@@ -20,16 +27,51 @@ import inspect
 import json
 import os
 import re
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from research_agent.config import logger
+from research_agent.config import DEFAULT_MODEL, logger
 from research_agent.interfaces.llm import LLM
 
-# Sentinel constant indicating the termination of a graph workflow
+# Sentinel node name that terminates a graph workflow.
 END = "__end__"
+
+# Timestamp formats used in traces, trajectory rows and checkpoints.
+_CLOCK_FORMAT = "%H:%M:%S"
+_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_STATE_ID_FORMAT = "%Y%m%d_%H%M%S"
+
+# Characters of a tool observation shown in verbose logs.
+_OBSERVATION_PREVIEW_CHARS = 200
+# Characters of the user prompt shown in verbose logs.
+_PROMPT_PREVIEW_CHARS = 120
+
+# Agents whose output is the user-facing answer, most authoritative first. The critic
+# is deliberately absent: its score must never be returned as the answer.
+_OUTPUT_AGENT_PRIORITY = ("BriefRefiner", "Refiner", "DraftWriter", "ResearchPlanner", "Planner")
+
+# GraphState fields that are never repeated to agents as "Current Context".
+_STATE_BASE_KEYS = frozenset(
+    {
+        "question",
+        "output",
+        "state_unique_id",
+        "thread_id",
+        "agents",
+        "tools",
+        "trajectory",
+        "refine_count",
+        "input",
+    }
+)
+
+
+def _local_now(fmt: str) -> str:
+    """Return the current local time formatted with ``fmt``."""
+    return datetime.now(timezone.utc).astimezone().strftime(fmt)
 
 
 # ===========================================================================
@@ -53,18 +95,28 @@ class Tool:
     func: Callable
     parameters: dict[str, Any] | None = None
 
-    def __post_init__(self):
-        # Sanitize name to adhere to valid function identifier conventions
+    def __post_init__(self) -> None:
+        """Normalise the name so provider SDKs accept it as a function identifier."""
         self.name = re.sub(r"[^a-zA-Z0-9_]", "_", self.name)
-        try:
+        # Some callables (e.g. bound methods, builtins) do not allow these attributes to
+        # be set; the Tool still works, it just keeps the callable's original metadata.
+        with contextlib.suppress(AttributeError):
             self.func.__name__ = self.name
             if self.description:
                 self.func.__doc__ = self.description
-        except AttributeError:
-            pass
 
-    def execute(self, **kwargs) -> str:
-        """Executes the tool with error interception, returning structured string output."""
+    def execute(self, **kwargs: Any) -> str:
+        """Run the tool and always return a string.
+
+        Dicts and lists are serialised as JSON. Exceptions are caught and returned as an
+        error message so the calling LLM can correct its arguments and retry.
+
+        Args:
+            **kwargs: Arguments forwarded to the wrapped function.
+
+        Returns:
+            The tool output, or a readable error message.
+        """
         try:
             result = self.func(**kwargs)
             if isinstance(result, (dict, list)):
@@ -74,11 +126,11 @@ class Tool:
             # Intercept tool-level exceptions so the LLM can self-correct
             return f"Error executing tool '{self.name}': {type(e).__name__} - {e!s}"
 
-    def to_callable(self) -> Callable:
-        """Converts Tool instance into a wrapped callable compatible with provider SDKs."""
+    def to_callable(self) -> Callable[..., str]:
+        """Return a plain function wrapper, as expected by provider SDKs (e.g. Ollama)."""
 
         @functools.wraps(self.func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> str:
             return self.execute(*args, **kwargs)
 
         wrapper.__name__ = self.name
@@ -86,8 +138,25 @@ class Tool:
         return wrapper
 
 
-def tool(name: str | None = None, description: str | None = None):
-    """Decorator converting any Python function into an LLM-executable Tool object."""
+def tool(
+    name: str | None = None, description: str | None = None
+) -> Callable[[Callable[..., Any]], Tool]:
+    """Turn a Python function into a ``Tool`` that agents can call.
+
+    Args:
+        name: Tool name shown to the LLM. Defaults to the function name.
+        description: Tool description shown to the LLM. Defaults to the docstring.
+
+    Returns:
+        A decorator that replaces the function with a ``Tool`` instance.
+
+    Example:
+        >>> @tool(description="Add two integers.")
+        ... def add(a: int, b: int) -> int:
+        ...     return a + b
+        >>> add.execute(a=1, b=2)
+        '3'
+    """
 
     def decorator(fn: Callable) -> Tool:
         tool_name = name or fn.__name__
@@ -135,9 +204,9 @@ class AgentResponse:
     def __str__(self) -> str:
         return self.content
 
-    def display_trace(self):
-        """Outputs step-by-step reasoning steps to the configured logger."""
-        logger.info(f"[TRACE] Execution Trace for Agent: {self.agent_name}")
+    def display_trace(self) -> None:
+        """Write each reasoning step of this run to the project log."""
+        logger.info("[TRACE] Execution Trace for Agent: %s", self.agent_name)
         for step in self.trace:
             prefix = {
                 "thought": "[THOUGHT]",
@@ -151,7 +220,7 @@ class AgentResponse:
                 if isinstance(step.content, (dict, list))
                 else str(step.content)
             )
-            logger.info(f"  {prefix} ({step.timestamp}) -> {body}")
+            logger.info("  %s (%s) -> %s", prefix, step.timestamp, body)
 
 
 # ===========================================================================
@@ -173,26 +242,41 @@ class Agent:
         self,
         name: str,
         model: str | LLM | None = None,
-        tools: list[Tool | Callable] | None = None,
+        tools: Sequence[Tool | Callable[..., Any]] | None = None,
         system_prompt: str | None = None,
         role: str | None = None,
         llm: LLM | None = None,
         max_iterations: int = 10,
         memory: list[dict[str, Any]] | None = None,
         verbose: bool = False,
-    ):
+    ) -> None:
+        """Create an agent.
+
+        Args:
+            name: Unique agent name; also the key of its output in ``GraphState.agents``.
+            model: Model name, or an ``LLM`` client to use directly.
+            tools: Tools (or plain functions) the agent may call.
+            system_prompt: Generic instructions appended after the role.
+            role: Role description placed at the top of the system prompt.
+            llm: LLM client. Ignored when ``model`` is already an ``LLM``.
+            max_iterations: Upper bound on LLM calls per ``run`` (prevents tool loops).
+            memory: Optional initial message history.
+            verbose: Log every thought, tool call and observation.
+        """
         self.llm: LLM
         self.model: str
+        # Resolve the client in priority order: model-as-client, explicit llm, factory.
         if isinstance(model, LLM):
             self.llm = model
-            self.model = str(getattr(model, "model", "gemma4:31b"))
+            self.model = str(getattr(model, "model", DEFAULT_MODEL))
         elif llm is not None:
             self.llm = llm
-            self.model = str(model or getattr(llm, "model", "gemma4:31b"))
+            self.model = str(model or getattr(llm, "model", DEFAULT_MODEL))
         else:
+            # Local import: interfaces.llm is heavy and only needed for this fallback.
             from research_agent.interfaces.llm import get_llm
 
-            self.model = str(model or "gemma4:31b")
+            self.model = str(model or DEFAULT_MODEL)
             self.llm = get_llm(model=self.model)
 
         self.name = name
@@ -208,8 +292,12 @@ class Agent:
             for t in tools:
                 self.add_tool(t)
 
-    def add_tool(self, tool_item: Tool | Callable):
-        """Attaches a tool to the agent's available execution capabilities."""
+    def add_tool(self, tool_item: Tool | Callable[..., Any]) -> None:
+        """Register a tool; plain callables are wrapped in a ``Tool`` automatically.
+
+        Raises:
+            TypeError: If ``tool_item`` is neither a ``Tool`` nor callable.
+        """
         if isinstance(tool_item, Tool):
             self.tools[tool_item.name] = tool_item
         elif callable(tool_item):
@@ -224,7 +312,7 @@ class Agent:
 
     def _format_system_prompt(self) -> str:
         """Injects contextual timestamps and available tool descriptors into the system prompt."""
-        now_str = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = _local_now(_DATETIME_FORMAT)
         tool_descs = "\n".join(f"- {t.name}: {t.description}" for t in self.tools.values())
         header = f"Current Time: {now_str}\nRole: {self.role}\n"
         if tool_descs:
@@ -232,11 +320,87 @@ class Agent:
         return f"{header}\n{self.system_prompt}".strip()
 
     def _extract_tool_callables(self) -> Any:
-        """Delegates tool callable/schema formatting to the configured LLM interface."""
-        return self.llm._extract_tool_callables(self.tools)
+        """Delegate tool formatting to the LLM client (callables or JSON schemas)."""
+        return self.llm.get_tool_callables(self.tools)
+
+    def _log_activation(self, prompt: str | None) -> None:
+        """Log which agent is starting, with its model, role and prompt preview."""
+        logger.info("=" * 80)
+        logger.info("[AGENT ACTIVATION: %s]", self.name)
+        logger.info("  - Model : %s", self.model)
+        logger.info("  - Role  : %s", self.role)
+        if prompt:
+            preview = (
+                prompt[:_PROMPT_PREVIEW_CHARS] + "..."
+                if len(prompt) > _PROMPT_PREVIEW_CHARS
+                else prompt
+            )
+            logger.info('  - Prompt: "%s"', preview)
+        logger.info("=" * 80)
+
+    def _execute_tool_call(self, call: dict[str, Any], now: str, trace: list[TraceStep]) -> None:
+        """Run one tool call requested by the LLM and record call and observation.
+
+        The observation is appended to the conversation as a ``tool`` message so the
+        model sees it on the next iteration.
+        """
+        fn_name = call["name"]
+        fn_args = call["args"]
+        call_desc = f"{fn_name}({json.dumps(fn_args)})"
+
+        trace.append(
+            TraceStep(
+                now,
+                self.name,
+                "tool_call",
+                {"tool": fn_name, "arguments": fn_args},
+                metadata={"raw_call": call_desc},
+            )
+        )
+
+        if self.verbose:
+            logger.info("[ACTION: %s]: Calling tool -> %s", self.name, call_desc)
+
+        if fn_name in self.tools:
+            obs = self.tools[fn_name].execute(**fn_args)
+        else:
+            # Unknown tool: tell the model which tools exist so it can recover.
+            obs = f"Error: Tool '{fn_name}' is not in available tools: {list(self.tools.keys())}"
+
+        if self.verbose:
+            preview = (
+                obs[:_OBSERVATION_PREVIEW_CHARS] + "..."
+                if len(obs) > _OBSERVATION_PREVIEW_CHARS
+                else obs
+            )
+            logger.info("[OBSERVATION: %s]: %s", self.name, preview)
+
+        trace.append(
+            TraceStep(
+                _local_now(_CLOCK_FORMAT),
+                self.name,
+                "tool_result",
+                obs,
+                metadata={"tool": fn_name, "args": fn_args},
+            )
+        )
+
+        self.messages.append({"role": "tool", "content": str(obs)})
 
     def run(self, prompt: str | None = None) -> AgentResponse:
-        """Executes the multi-turn ReAct reasoning loop until completion."""
+        """Run the ReAct loop until the model answers without calling a tool.
+
+        Each iteration sends the conversation to the LLM, executes any requested tools
+        and appends their observations. LLM errors end the run with an error response
+        rather than raising, so one failing agent does not abort the whole graph.
+
+        Args:
+            prompt: New user message to append before running. ``None`` continues the
+                existing conversation.
+
+        Returns:
+            The final answer, the step-by-step trace and the full message history.
+        """
         # Ensure system prompt is initialized at index 0 of message history
         if not self.messages or self.messages[0].get("role") != "system":
             self.messages.insert(0, {"role": "system", "content": self._format_system_prompt()})
@@ -249,28 +413,18 @@ class Agent:
         final_text = ""
 
         if self.verbose:
-            logger.info("=" * 80)
-            logger.info(f"[AGENT ACTIVATION: {self.name}]")
-            logger.info(f"  - Model : {self.model}")
-            logger.info(f"  - Role  : {self.role}")
-            if prompt:
-                logger.info(
-                    f'  - Prompt: "{prompt[:120]}..."'
-                    if len(prompt) > 120
-                    else f'  - Prompt: "{prompt}"'
-                )
-            logger.info("=" * 80)
+            self._log_activation(prompt)
 
         while iteration < self.max_iterations:
             iteration += 1
-            now = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
+            now = _local_now(_CLOCK_FORMAT)
 
             try:
                 content, tool_calls, raw_msg = self.llm.chat(self.messages, self.tools)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 - any provider error ends this agent only
                 err_msg = f"API Error communicating with model '{self.model}': {e!s}"
                 if self.verbose:
-                    logger.error(f"[ERROR: {self.name}] {err_msg}")
+                    logger.error("[ERROR: %s] %s", self.name, err_msg)
                 trace.append(TraceStep(now, self.name, "error", err_msg))
                 return AgentResponse(
                     self.name, prompt or "", err_msg, trace, self.messages, iteration
@@ -281,59 +435,26 @@ class Agent:
             if content:
                 trace.append(TraceStep(now, self.name, "thought", content))
                 if self.verbose and tool_calls:
-                    logger.info(f"[THOUGHT: {self.name}]: {content}")
+                    logger.info("[THOUGHT: %s]: %s", self.name, content)
 
             if not tool_calls:
                 final_text = content or "(No text returned)"
                 trace.append(TraceStep(now, self.name, "final_answer", final_text))
                 if self.verbose:
-                    logger.info(f"[FINAL ANSWER: {self.name}]:\n{final_text}")
+                    logger.info("[FINAL ANSWER: %s]:\n%s", self.name, final_text)
                 break
 
             for call in tool_calls:
-                fn_name = call["name"]
-                fn_args = call["args"]
-                call_desc = f"{fn_name}({json.dumps(fn_args)})"
-
-                trace.append(
-                    TraceStep(
-                        now,
-                        self.name,
-                        "tool_call",
-                        {"tool": fn_name, "arguments": fn_args},
-                        metadata={"raw_call": call_desc},
-                    )
-                )
-
-                if self.verbose:
-                    logger.info(f"[ACTION: {self.name}]: Calling tool -> {call_desc}")
-
-                if fn_name in self.tools:
-                    obs = self.tools[fn_name].execute(**fn_args)
-                else:
-                    obs = f"Error: Tool '{fn_name}' is not in available tools: {list(self.tools.keys())}"
-
-                if self.verbose:
-                    preview = (obs[:200] + "...") if len(obs) > 200 else obs
-                    logger.info(f"[OBSERVATION: {self.name}]: {preview}")
-
-                trace.append(
-                    TraceStep(
-                        datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S"),
-                        self.name,
-                        "tool_result",
-                        obs,
-                        metadata={"tool": fn_name, "args": fn_args},
-                    )
-                )
-
-                self.messages.append({"role": "tool", "content": str(obs)})
+                self._execute_tool_call(call, now, trace)
 
         if iteration >= self.max_iterations and not final_text:
-            final_text = f"Agent '{self.name}' stopped after reaching maximum iterations ({self.max_iterations})."
+            final_text = (
+                f"Agent '{self.name}' stopped after reaching maximum iterations "
+                f"({self.max_iterations})."
+            )
             trace.append(
                 TraceStep(
-                    datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S"),
+                    _local_now(_CLOCK_FORMAT),
                     self.name,
                     "final_answer",
                     final_text,
@@ -369,14 +490,20 @@ class GraphState:
     refine_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        """Converts state attributes into a serializable dictionary."""
-        return asdict(self) if hasattr(self, "__dataclass_fields__") else vars(self)
+        """Return the declared fields as a JSON-serialisable dictionary."""
+        return asdict(self)
 
     @property
     def tools_data(self) -> dict[str, Any]:
+        """Alias of ``tools`` kept for notebooks written against the earlier API."""
         return self.tools
 
     def __getitem__(self, item: str) -> Any:
+        """Dict-style access to fields, extra attributes and agent outputs.
+
+        Raises:
+            KeyError: If ``item`` is not a field, attribute or agent name.
+        """
         if item == "tools_data":
             return self.tools
         if hasattr(self, item):
@@ -385,10 +512,12 @@ class GraphState:
             return self.agents[item]
         raise KeyError(item)
 
-    def __setitem__(self, key: str, value: Any):
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Dict-style assignment; unknown keys become extra attributes."""
         setattr(self, key, value)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Return ``self[key]``, or ``default`` when the key does not exist."""
         try:
             return self[key]
         except KeyError:
@@ -401,19 +530,24 @@ class GraphState:
 
 
 class GraphMemory:
-    """Thread-safe persistence layer for workflow checkpoints, organized by thread_id -> states."""
+    """Checkpoint store for finished workflow runs, organised as thread_id -> states.
 
-    def __init__(self, filepath: str | None = None):
+    Records are kept in memory and, when ``filepath`` is set, rewritten to a JSON file
+    after every ``write``. It is not safe for concurrent writers across processes.
+    """
+
+    def __init__(self, filepath: str | None = None) -> None:
         self.filepath = filepath
         self.records: dict[str, dict[str, Any]] = {}
         if self.filepath and os.path.exists(self.filepath):
             self.load(self.filepath)
 
     def write(self, state: GraphState | dict[str, Any]) -> str:
-        """Serializes and records state snapshot inside its thread_id container."""
-        import uuid
+        """Store a snapshot of ``state`` under its thread and return the new state id.
 
-        now_str = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
+        The id is also written back onto ``state`` (``state_unique_id``).
+        """
+        now_str = _local_now(_STATE_ID_FORMAT)
         unique_id = f"state_{now_str}_{uuid.uuid4().hex[:6]}"
 
         thread_id = (
@@ -433,9 +567,7 @@ class GraphMemory:
 
         snapshot["state_unique_id"] = unique_id
         snapshot["thread_id"] = thread_id
-        snapshot["timestamp"] = (
-            datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        )
+        snapshot["timestamp"] = _local_now(_DATETIME_FORMAT)
         if "question" in snapshot and "input" not in snapshot:
             snapshot["input"] = snapshot["question"]
 
@@ -481,8 +613,7 @@ class GraphMemory:
         all_keys = list(states_dict.keys())
         total_records = len(all_keys)
         total_pages = max(1, (total_records + limit - 1) // limit)
-        if page > total_pages:
-            page = total_pages
+        page = min(page, total_pages)  # clamp out-of-range requests to the last page
 
         start = (page - 1) * limit
         end = start + limit
@@ -528,7 +659,8 @@ class GraphMemory:
             Tool(
                 name="get_history_states",
                 description=(
-                    "Retrieve paginated workflow history. Args: page (int), limit (int), thread_id (str, optional). "
+                    "Retrieve paginated workflow history. Args: page (int), limit (int), "
+                    "thread_id (str, optional). "
                     "Check total_pages and has_next_page to navigate."
                 ),
                 func=self.get_history_states,
@@ -540,7 +672,10 @@ class GraphMemory:
             ),
             Tool(
                 name="list_state_ids",
-                description="List recorded state_unique_id values in graph memory. Optional arg: thread_id (str).",
+                description=(
+                    "List recorded state_unique_id values in graph memory. "
+                    "Optional arg: thread_id (str)."
+                ),
                 func=self.list_state_ids,
             ),
             Tool(
@@ -550,16 +685,19 @@ class GraphMemory:
             ),
         ]
 
-    def save(self, filepath: str | None = None):
-        """Persists records dictionary to disk."""
+    def save(self, filepath: str | None = None) -> None:
+        """Write all records to ``filepath`` (defaults to the store's own file)."""
         target = filepath or self.filepath
         if target:
             os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
             with open(target, "w", encoding="utf-8") as f:
                 json.dump(self.records, f, indent=2, default=str)
 
-    def load(self, filepath: str):
-        """Loads records dictionary from disk, normalizing legacy flat structures."""
+    def load(self, filepath: str) -> None:
+        """Load records from disk, converting the legacy flat layout to threads.
+
+        A missing, empty or corrupt file yields an empty store instead of an error.
+        """
         if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
             self.records = {}
             return
@@ -594,14 +732,18 @@ class GraphMemory:
 
 
 class StateGraph:
-    """Directed acyclic/cyclic workflow graph builder supporting agent nodes, routing, and parallelism."""
+    """Builder for a workflow graph of agent, function and parallel-group nodes.
+
+    Cycles are allowed (e.g. critic -> refiner -> critic); ``invoke`` bounds them with
+    ``max_steps``.
+    """
 
     def __init__(
         self,
         state_schema: type = GraphState,
         memory: GraphMemory | None = None,
         verbose: bool = False,
-    ):
+    ) -> None:
         self.state_schema = state_schema
         self.memory = memory or GraphMemory()
         self.verbose = verbose
@@ -687,7 +829,7 @@ def _extract_tool_activity(trace: list[TraceStep]) -> list[dict[str, Any]]:
 class CompiledStateGraph:
     """Immutable execution engine compiled from StateGraph."""
 
-    def __init__(self, graph: StateGraph):
+    def __init__(self, graph: StateGraph) -> None:
         self.graph = graph
         self.memory = graph.memory
         self.verbose = graph.verbose
@@ -722,27 +864,34 @@ class CompiledStateGraph:
 
         return "\n".join(lines)
 
-    def draw(self, as_image: bool = True):
-        """Displays Mermaid diagram in interactive environments or outputs to logs."""
+    def draw(self, as_image: bool = True) -> str:
+        """Show the graph as a Mermaid diagram in Jupyter, or log it elsewhere.
+
+        Args:
+            as_image: Render through mermaid.ink as an image instead of a code block.
+
+        Returns:
+            The Mermaid source.
+        """
         chart = self.to_mermaid()
         try:
             import base64
 
-            from IPython.display import Image, Markdown, display  # type: ignore[import-not-found]
+            from IPython.display import Image, Markdown, display
 
             if as_image:
                 b64 = base64.b64encode(chart.encode("utf-8")).decode("ascii")
                 display(Image(url=f"https://mermaid.ink/img/{b64}"))
             else:
                 display(Markdown(f"```mermaid\n{chart}\n```"))
-        except Exception:  # noqa: BLE001
-            logger.info(f"\n[MERMAID GRAPH]:\n{chart}")
+        except Exception:  # noqa: BLE001 - no IPython / display: fall back to the log
+            logger.info("\n[MERMAID GRAPH]:\n%s", chart)
         return chart
 
     def _initialize_state(self, state: GraphState | dict[str, Any]) -> GraphState:
         """Instantiates and aligns input state against the defined schema."""
         if isinstance(state, self.graph.state_schema):
-            return state  # type: ignore[return-value]
+            return state  # type: ignore[return-value]  # schema is a GraphState subclass
 
         if isinstance(state, dict):
             schema_fields = set()
@@ -760,9 +909,9 @@ class CompiledStateGraph:
             for k, v in state.items():
                 if k not in schema_fields:
                     setattr(current_state, k, v)
-            return current_state  # type: ignore[return-value]
+            return current_state
 
-        return self.graph.state_schema()  # type: ignore[return-value]
+        return self.graph.state_schema()
 
     def _build_agent_prompt(self, agent: Agent, state: GraphState) -> str:
         """Constructs comprehensive prompt injecting blackboard state and prior agent outputs."""
@@ -771,21 +920,13 @@ class CompiledStateGraph:
         if user_query:
             prompt_parts.append(f"User Request / Goal:\n{user_query}")
 
-        base_keys = {
-            "question",
-            "output",
-            "state_unique_id",
-            "thread_id",
-            "agents",
-            "tools",
-            "trajectory",
-            "refine_count",
-            "input",
+        # Extra payload keys (e.g. active_ticker, conversation_context) are shown to
+        # every agent as context; internal and empty values are skipped.
+        custom_attrs = {
+            k: v
+            for k, v in state.__dict__.items()
+            if k not in _STATE_BASE_KEYS and not k.startswith("_") and v is not None and v != ""
         }
-        custom_attrs = {}
-        for k, v in state.__dict__.items():
-            if k not in base_keys and not k.startswith("_") and v is not None and v != "":
-                custom_attrs[k] = v
 
         if custom_attrs:
             prompt_parts.append(
@@ -801,7 +942,7 @@ class CompiledStateGraph:
 
         return "\n\n".join(prompt_parts)
 
-    def _harvest_agent_tools(self, agent: Agent, resp: AgentResponse, state: GraphState):
+    def _harvest_agent_tools(self, agent: Agent, resp: AgentResponse, state: GraphState) -> None:
         """Harvests observations from agent traces and updates state.tools."""
         if agent.name not in state.tools:
             state.tools[agent.name] = {}
@@ -822,11 +963,11 @@ class CompiledStateGraph:
         state: GraphState,
         step_count: int,
         start_time: str,
-    ):
-        """Executes a list of agents for a parallel workflow node."""
+    ) -> None:
+        """Run a group of independent agents (sequentially) as one workflow node."""
         if self.verbose:
             names = ", ".join(a.name for a in agents)
-            logger.info(f">> STEP {step_count} | NODE: {node_name} [PARALLEL: {names}]")
+            logger.info(">> STEP %s | NODE: %s [PARALLEL: %s]", step_count, node_name, names)
 
         tools_called = set()
         for agent in agents:
@@ -843,18 +984,18 @@ class CompiledStateGraph:
 
             activities = _extract_tool_activity(resp.trace)
             if self.verbose:
-                logger.info(f"  --> Agent Completed: '{agent.name}'")
-                logger.info(f"      - Role   : {_compact_text(agent.role, 80)}")
+                logger.info("  --> Agent Completed: '%s'", agent.name)
+                logger.info("      - Role   : %s", _compact_text(agent.role, 80))
                 if activities:
                     logger.info("      - Tools Executed:")
                     for act in activities:
                         args_str = ", ".join(f"{k}={v!r}" for k, v in act["arguments"].items())
-                        logger.info(f"        [TOOL CALL]    {act['tool']}({args_str})")
+                        logger.info("        [TOOL CALL]    %s(%s)", act["tool"], args_str)
                         if act["observation"] is not None:
                             logger.info(
-                                f"        [OBSERVATION]  {_compact_text(act['observation'], 90)}"
+                                "        [OBSERVATION]  %s", _compact_text(act["observation"], 90)
                             )
-                logger.info(f"      - Output : {_compact_text(resp.content, 120)}")
+                logger.info("      - Output : %s", _compact_text(resp.content, 120))
 
         state.trajectory.append(
             {
@@ -864,7 +1005,9 @@ class CompiledStateGraph:
                 "type": "parallel",
                 "agents": [a.name for a in agents],
                 "tools": sorted(tools_called),
-                "summary": f"Executed {len(agents)} parallel specialists: {[a.name for a in agents]}",
+                "summary": (
+                    f"Executed {len(agents)} parallel specialists: {[a.name for a in agents]}"
+                ),
             }
         )
 
@@ -875,8 +1018,8 @@ class CompiledStateGraph:
         state: GraphState,
         step_count: int,
         start_time: str,
-    ):
-        """Executes a single Agent node."""
+    ) -> None:
+        """Run a single agent node and record its output and tool usage."""
         p = self._build_agent_prompt(agent, state)
         resp = agent.run(p)
         state.agents[agent.name] = resp.content
@@ -893,16 +1036,16 @@ class CompiledStateGraph:
         activities = _extract_tool_activity(resp.trace)
 
         if self.verbose:
-            logger.info(f">> STEP {step_count} | NODE: {node_name} [AGENT: {agent.name}]")
-            logger.info(f"  - Role    : {_compact_text(agent.role, 80)}")
+            logger.info(">> STEP %s | NODE: %s [AGENT: %s]", step_count, node_name, agent.name)
+            logger.info("  - Role    : %s", _compact_text(agent.role, 80))
             if activities:
                 logger.info("  - Tools Executed:")
                 for act in activities:
                     args_str = ", ".join(f"{k}={v}" for k, v in act["arguments"].items())
-                    logger.info(f"    [TOOL CALL]    {act['tool']}({args_str})")
+                    logger.info("    [TOOL CALL]    %s(%s)", act["tool"], args_str)
                     if act["observation"] is not None:
-                        logger.info(f"    [OBSERVATION]  {_compact_text(act['observation'], 90)}")
-            logger.info(f"  - Output  : {_compact_text(resp.content, 120)}")
+                        logger.info("    [OBSERVATION]  %s", _compact_text(act["observation"], 90))
+            logger.info("  - Output  : %s", _compact_text(resp.content, 120))
 
         state.trajectory.append(
             {
@@ -942,8 +1085,8 @@ class CompiledStateGraph:
             ", ".join(f"{k}={v}" for k, v in updates.items()) if updates else "no state delta"
         )
         if self.verbose:
-            logger.info(f">> STEP {step_count} | NODE: {node_name} [FUNCTION: {fn_name}]")
-            logger.info(f"  - Updates : {update_str}")
+            logger.info(">> STEP %s | NODE: %s [FUNCTION: %s]", step_count, node_name, fn_name)
+            logger.info("  - Updates : %s", update_str)
 
         state.trajectory.append(
             {
@@ -987,33 +1130,33 @@ class CompiledStateGraph:
 
             if self.verbose:
                 logger.info(
-                    f"  --> Transition: '{current_node}' --> '{next_node}' (Condition: '{route_key}')"
+                    "  --> Transition: '%s' --> '%s' (Condition: '%s')",
+                    current_node,
+                    next_node,
+                    route_key,
                 )
             return next_node
 
         if current_node in self.graph.edges:
             next_node = self.graph.edges[current_node]
             if self.verbose:
-                logger.info(f"  --> Transition: '{current_node}' --> '{next_node}'")
+                logger.info("  --> Transition: '%s' --> '%s'", current_node, next_node)
             return next_node
 
         if self.verbose:
-            logger.info(f"  --> Transition: '{current_node}' --> END (Workflow Completed)")
+            logger.info("  --> Transition: '%s' --> END (Workflow Completed)", current_node)
         return END
 
-    def _finalize_output(self, state: GraphState):
-        """Ensures state.output is populated from the content generator rather than reviewer score."""
+    def _finalize_output(self, state: GraphState) -> None:
+        """Set ``state.output`` from the best content-producing agent.
+
+        The critic's score is never used as the answer. A leading "Change Summary"
+        written by the refiner is stripped so only the polished brief remains.
+        """
         if not state.output:
-            if "BriefRefiner" in state.agents:
-                state.output = state.agents["BriefRefiner"]
-            elif "Refiner" in state.agents:
-                state.output = state.agents["Refiner"]
-            elif "DraftWriter" in state.agents:
-                state.output = state.agents["DraftWriter"]
-            elif "ResearchPlanner" in state.agents:
-                state.output = state.agents["ResearchPlanner"]
-            elif "Planner" in state.agents:
-                state.output = state.agents["Planner"]
+            producer = next((name for name in _OUTPUT_AGENT_PRIORITY if name in state.agents), None)
+            if producer is not None:
+                state.output = state.agents[producer]
             elif state.trajectory:
                 reversed_steps = [
                     s
@@ -1032,7 +1175,19 @@ class CompiledStateGraph:
                     break
 
     def invoke(self, state: GraphState | dict[str, Any], max_steps: int = 25) -> GraphState:
-        """Executes the workflow graph starting at entry_point until END or max_steps reached."""
+        """Run the graph from the entry point until ``END`` or ``max_steps``.
+
+        Args:
+            state: A ``GraphState`` or a payload dict. Unknown dict keys become extra
+                state attributes and are shown to agents as context.
+            max_steps: Safety limit on node executions (guards against routing loops).
+
+        Returns:
+            The final state; the run is also checkpointed in ``memory``.
+
+        Raises:
+            ValueError: If the graph has no entry point or routes to an unknown node.
+        """
         current_state = self._initialize_state(state)
         if not self.graph.entry_point:
             raise ValueError("StateGraph has no entry_point defined.")
@@ -1044,9 +1199,9 @@ class CompiledStateGraph:
         if self.verbose:
             logger.info("=" * 80)
             logger.info("[STATE GRAPH RUN START]")
-            logger.info(f"   - Entry Point : {current_node}")
+            logger.info("   - Entry Point : %s", current_node)
             if user_query:
-                logger.info(f'   - User Query  : "{_compact_text(user_query, 80)}"')
+                logger.info('   - User Query  : "%s"', _compact_text(user_query, 80))
             logger.info("=" * 80)
 
         while current_node != END and step_count < max_steps:
@@ -1055,7 +1210,7 @@ class CompiledStateGraph:
             if node_target is None:
                 raise ValueError(f"Target node '{current_node}' not found in graph nodes.")
 
-            node_start_time = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
+            node_start_time = _local_now(_CLOCK_FORMAT)
 
             if isinstance(node_target, list):
                 self._execute_parallel_node(
@@ -1090,7 +1245,9 @@ class CompiledStateGraph:
         if self.verbose:
             logger.info("=" * 80)
             logger.info(
-                f"[SUCCESS] STATE GRAPH RUN COMPLETED | Total Steps: {step_count} | Persisted State ID: {new_state_id}"
+                "[SUCCESS] STATE GRAPH RUN COMPLETED | Total Steps: %s | Persisted State ID: %s",
+                step_count,
+                new_state_id,
             )
             logger.info("=" * 80)
 
@@ -1102,8 +1259,11 @@ class CompiledStateGraph:
 # ===========================================================================
 
 
+_TRAJECTORY_HEADERS = ("Step", "Node", "Type", "Executor", "Tools Called", "Summary / Decision")
+
+
 def _format_step_summary(step: dict[str, Any], max_len: int = 80) -> str:
-    """Formats a concise single-line summary of a trajectory step."""
+    """Return a one-line summary of a trajectory step for tables."""
     summary = step.get("summary", "")
     if not summary:
         output_val = step.get("output", "")
@@ -1117,8 +1277,55 @@ def _format_step_summary(step: dict[str, Any], max_len: int = 80) -> str:
     return summary.replace("\n", " ").strip()
 
 
+def _step_executor(step: dict[str, Any]) -> str:
+    """Return who ran a step: the agent/function name, or the parallel agent names."""
+    return str(
+        step.get("executor") or step.get("agent") or ", ".join(step.get("agents", [])) or "-"
+    )
+
+
+def format_trajectory_markdown(trajectory: list[dict[str, Any]]) -> str:
+    """Render a trajectory as a GitHub-flavoured Markdown table.
+
+    Args:
+        trajectory: ``GraphState.trajectory`` rows.
+
+    Returns:
+        The table, or an empty string when there are no steps.
+    """
+    if not trajectory:
+        return ""
+
+    md_lines = [
+        "| " + " | ".join(_TRAJECTORY_HEADERS) + " |",
+        "| :---: | :--- | :--- | :--- | :--- | :--- |",
+    ]
+    for step in trajectory:
+        tools = step.get("tools", [])
+        cells = (
+            step.get("step", "-"),
+            f"`{step.get('node', '-')}`",
+            str(step.get("type", "-")).capitalize(),
+            _step_executor(step),
+            ", ".join(f"`{t}`" for t in tools) if tools else "-",
+            # Escape pipes so free text cannot break the table layout.
+            _format_step_summary(step, max_len=80).replace("|", "\\|"),
+        )
+        md_lines.append("| " + " | ".join(str(cell) for cell in cells) + " |")
+    return "\n".join(md_lines)
+
+
 def display_trajectory(state: GraphState | dict[str, Any], as_markdown: bool | None = None) -> Any:
-    """Renders formatted execution trajectory table in Markdown or ASCII console format."""
+    """Show the execution trajectory as a Markdown (Jupyter) or ASCII (log) table.
+
+    Args:
+        state: Final ``GraphState`` or a dict with a ``trajectory`` key.
+        as_markdown: Force the format; by default Markdown is used inside Jupyter.
+
+    Returns:
+        The rendered table text, or None when it was displayed in Jupyter or there is
+        nothing to show.
+    """
     trajectory = getattr(state, "trajectory", None)
     if trajectory is None and isinstance(state, dict):
         trajectory = state.get("trajectory", [])
@@ -1128,7 +1335,7 @@ def display_trajectory(state: GraphState | dict[str, Any], as_markdown: bool | N
 
     in_ipython = False
     with contextlib.suppress(Exception):
-        from IPython import get_ipython  # type: ignore[import-not-found]
+        from IPython import get_ipython
 
         ip = get_ipython()
         if ip is not None and "IPKernelApp" in ip.config:
@@ -1137,37 +1344,14 @@ def display_trajectory(state: GraphState | dict[str, Any], as_markdown: bool | N
     use_markdown = as_markdown if as_markdown is not None else in_ipython
 
     if use_markdown:
-        md_lines = [
-            "### Execution Trajectory Summary",
-            "",
-            "| Step | Node | Type | Executor | Tools Called | Summary / Decision |",
-            "| :---: | :--- | :--- | :--- | :--- | :--- |",
-        ]
-        for step in trajectory:
-            s_num = step.get("step", "-")
-            s_node = f"`{step.get('node', '-')}`"
-            s_type = str(step.get("type", "-")).capitalize()
-            s_exec = (
-                step.get("executor")
-                or step.get("agent")
-                or ", ".join(step.get("agents", []))
-                or "-"
-            )
-            tools = step.get("tools", [])
-            s_tools = ", ".join(f"`{t}`" for t in tools) if tools else "-"
-            s_summary = _format_step_summary(step, max_len=80).replace("|", "\\|")
-            md_lines.append(
-                f"| {s_num} | {s_node} | {s_type} | {s_exec} | {s_tools} | {s_summary} |"
-            )
-
-        md_content = "\n".join(md_lines)
+        md_content = "### Execution Trajectory Summary\n\n" + format_trajectory_markdown(trajectory)
         try:
-            from IPython.display import Markdown, display  # type: ignore[import-not-found]
+            from IPython.display import Markdown, display
 
             display(Markdown(md_content))
-            return None
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - outside Jupyter: return the text instead
             return md_content
+        return None
 
     headers = ["Step", "Node", "Type", "Executor", "Tools Used", "Summary / Decision"]
     rows = []
@@ -1175,9 +1359,7 @@ def display_trajectory(state: GraphState | dict[str, Any], as_markdown: bool | N
         s_num = str(step.get("step", "-"))
         s_node = str(step.get("node", "-"))
         s_type = str(step.get("type", "-")).capitalize()
-        s_exec = str(
-            step.get("executor") or step.get("agent") or ", ".join(step.get("agents", [])) or "-"
-        )
+        s_exec = _step_executor(step)
         tools = step.get("tools", [])
         s_tools = ", ".join(tools) if tools else "-"
         s_summary = _format_step_summary(step, max_len=65)

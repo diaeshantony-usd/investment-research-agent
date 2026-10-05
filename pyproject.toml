@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.10.0",
     "pytest>=8.0.0",
     "ruff>=0.6.0",
 ]
@@ -33,8 +34,42 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
-ignore = ["E501"]
+# PEP 8 (E, W, N), PEP 257 docstrings (D, Google convention), type hints (ANN), plus
+# bug-prone patterns, lazy logging, test style and security checks.
+select = [
+    "E", "W", "F", "I", "N", "D", "UP", "B", "C4", "SIM", "ANN", "BLE", "G", "RET",
+    "PT", "ARG", "ERA", "PIE", "PERF", "PL", "RUF", "S", "TRY",
+]
+ignore = [
+    "D105",     # magic methods are self-explanatory
+    "D107",     # __init__ arguments are documented on the method or the class
+    "D205",     # module headers use a "path / ====" title block
+    "D212",     # Google style: summary on the line after the opening quotes is allowed
+    "D400",     # summary line may end with ":" or ")" in examples
+    "D415",
+    "ANN401",   # Any is deliberate where provider SDK objects are passed through
+    "PLC0415",  # local imports are used on purpose for optional/heavy dependencies
+    "PLR0913",  # agent factories and constructors take many optional settings
+    "PLR2004",  # small literals in formatting code are clearer inline
+    "TRY003",   # descriptive messages in raise statements are preferred here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "ANN", "D", "PLR2004", "ARG"]
+"*.ipynb" = ["D", "ANN", "E402", "T20", "S", "ERA", "BLE", "PLR"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+mypy-init-return = true
+
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

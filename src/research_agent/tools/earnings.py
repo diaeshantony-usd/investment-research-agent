@@ -55,23 +55,29 @@ _EARNINGS_DATABASE: dict[str, dict[str, Any]] = {
 
 @tool(
     name="get_earnings_data",
-    description="Retrieves quarterly earnings figures, revenue, margins, and cash flow for a stock ticker.",
+    description=(
+        "Retrieves quarterly earnings figures, revenue, margins, and cash flow for a stock ticker."
+    ),
 )
 def get_earnings_data(ticker: str) -> str:
     """Returns quarterly earnings figures for a given ticker symbol.
 
     Args:
         ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
+
+    Returns:
+        JSON with the latest quarter's revenue, margins, EPS and cash flow, or
+        an ``error`` field when the ticker is not covered.
     """
     clean_ticker = (ticker or "").strip().upper()
-    logger.info(f"Executing get_earnings_data for ticker: {clean_ticker}")
+    logger.info("Executing get_earnings_data for ticker: %s", clean_ticker)
 
     data = _EARNINGS_DATABASE.get(clean_ticker)
     if data:
         payload = {"ticker": clean_ticker, **data}
         return json.dumps(payload, indent=2)
 
-    logger.warning(f"No earnings data found for ticker: {clean_ticker}")
+    logger.warning("No earnings data found for ticker: %s", clean_ticker)
     return json.dumps(
         {
             "ticker": clean_ticker,

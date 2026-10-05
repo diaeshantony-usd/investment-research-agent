@@ -6,14 +6,15 @@ Draft Writer Agent: Synthesizes specialist findings into a cohesive, professiona
 
 from __future__ import annotations
 
-from typing import Any
-
 from research_agent.agent_framework import Agent
+from research_agent.interfaces.llm import LLM
 
 DRAFT_WRITER_ROLE = (
     "You are the Senior Research Editor and Brief Synthesizer. "
-    "Your primary responsibility is to consolidate disparate specialist findings (fundamentals, technicals, news, macro) "
-    "into an institutional-grade, publication-ready equity research brief formatted in clean Markdown.\n\n"
+    "Your primary responsibility is to consolidate disparate specialist findings (fundamentals, "
+    "technicals, news, macro) "
+    "into an institutional-grade, publication-ready equity research brief formatted in clean "
+    "Markdown.\n\n"
     "Required Document Structure:\n"
     "# Research Brief: [Company Ticker]\n"
     "## Executive Summary\n"
@@ -30,11 +31,20 @@ DRAFT_WRITER_ROLE = (
 
 
 def draft_writer_agent(
-    model: str | Any = None,
-    llm: Any = None,
+    model: str | LLM | None = None,
+    llm: LLM | None = None,
     verbose: bool = False,
 ) -> Agent:
-    """Creates the DraftWriter agent that synthesizes reports."""
+    """Create the DraftWriter agent that turns specialist findings into a brief.
+
+    Args:
+        model: Model name, or an ``LLM`` client to use directly.
+        llm: LLM client shared with the rest of the graph.
+        verbose: Log every thought, tool call and observation.
+
+    Returns:
+        A configured ``Agent`` named ``DraftWriter``.
+    """
     return Agent(
         name="DraftWriter",
         role=DRAFT_WRITER_ROLE,

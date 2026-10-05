@@ -48,23 +48,29 @@ _MARKET_DATABASE: dict[str, dict[str, Any]] = {
 
 @tool(
     name="get_market_technicals",
-    description="Retrieves technical price action, moving averages (SMA 50/200), RSI, and trend metrics.",
+    description=(
+        "Retrieves technical price action, moving averages (SMA 50/200), RSI, and trend metrics."
+    ),
 )
 def get_market_technicals(ticker: str) -> str:
     """Returns price action and technical indicators for a given stock ticker.
 
     Args:
         ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
+
+    Returns:
+        JSON with price, 52-week range, moving averages, RSI, beta and trend, or
+        an ``error`` field when the ticker is not covered.
     """
     clean_ticker = (ticker or "").strip().upper()
-    logger.info(f"Executing get_market_technicals for ticker: {clean_ticker}")
+    logger.info("Executing get_market_technicals for ticker: %s", clean_ticker)
 
     data = _MARKET_DATABASE.get(clean_ticker)
     if data:
         payload = {"ticker": clean_ticker, **data}
         return json.dumps(payload, indent=2)
 
-    logger.warning(f"No market technicals found for ticker: {clean_ticker}")
+    logger.warning("No market technicals found for ticker: %s", clean_ticker)
     return json.dumps(
         {
             "ticker": clean_ticker,

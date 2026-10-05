@@ -2,6 +2,14 @@
 interfaces/llm.py
 =================
 Abstract LLM interface with multi-provider implementations (Ollama and OpenAI).
+
+Every client returns the same normalised shape from ``chat`` so agents never depend on
+a provider SDK directly::
+
+    content, tool_calls, raw_message = llm.chat(messages, tools)
+    # tool_calls == [{"name": "get_earnings_data", "args": {"ticker": "NVDA"}}]
+
+Author: N L N Sai Krishna Akula
 """
 
 from __future__ import annotations
@@ -25,13 +33,19 @@ from research_agent.config import (
     logger,
 )
 
+__all__ = ["LLM", "LLMInterface", "OllamaLLM", "OpenAILLM", "get_llm"]
+
 
 class LLM(ABC):
     """Abstract interface defining the standardized contract for LLM backends."""
 
     def _extract_tool_callables(self, tools: dict[str, Any]) -> Any:
-        """Transforms Tool objects into the LLM-specific tool callable or schema format."""
-        callables = []
+        """Convert ``Tool`` objects into the provider's tool format.
+
+        The default returns plain callables (what the Ollama SDK expects); providers
+        that need JSON schemas override this.
+        """
+        callables: list[Callable[..., Any]] = []
         for t in tools.values():
             if hasattr(t, "to_callable"):
                 callables.append(t.to_callable())
@@ -40,7 +54,7 @@ class LLM(ABC):
         return callables
 
     def get_tool_callables(self, tools: dict[str, Any]) -> Any:
-        """Public alias for extracting tool callables/schemas."""
+        """Return ``tools`` in the provider's format (public wrapper)."""
         return self._extract_tool_callables(tools)
 
     @abstractmethod
@@ -49,7 +63,11 @@ class LLM(ABC):
         messages: list[dict[str, Any]],
         tools: dict[str, Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]], Any]:
-        """Sends conversation history and optional tools to the model.
+        """Send the conversation and optional tools to the model.
+
+        Args:
+            messages: Chat history in OpenAI-style ``{"role", "content"}`` format.
+            tools: Tools the model may call, keyed by name.
 
         Returns:
             tuple containing:
@@ -59,7 +77,7 @@ class LLM(ABC):
         """
 
 
-# Backward compatibility alias
+# Backward-compatible alias for code written against the earlier class name.
 LLMInterface = LLM
 
 
@@ -71,31 +89,33 @@ class OllamaLLM(LLM):
         model: str | None = None,
         host: str | None = None,
         api_key: str | None = None,
-    ):
+    ) -> None:
+        """Create an Ollama client.
+
+        Args:
+            model: Model name. Defaults to ``DEFAULT_MODEL``.
+            host: Ollama server URL. Defaults to ``OLLAMA_HOST``.
+            api_key: Bearer token for Ollama Cloud. Defaults to ``OLLAMA_API_KEY``;
+                not needed for a local Ollama server.
+        """
         self.model = model or DEFAULT_MODEL
         self.host = host or DEFAULT_OLLAMA_HOST
         self.api_key = api_key or DEFAULT_API_KEY
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         self.client = ollama.Client(host=self.host, headers=headers)
-        logger.info(f"Initialized OllamaLLM client [model={self.model}, host={self.host}]")
-
-    def _extract_tool_callables(self, tools: dict[str, Any]) -> list[Callable]:
-        """Extracts callables formatted for the Ollama SDK tool-calling interface."""
-        callables = []
-        for t in tools.values():
-            if hasattr(t, "to_callable"):
-                callables.append(t.to_callable())
-            elif callable(t):
-                callables.append(t)
-        return callables
+        logger.info("Initialized OllamaLLM client [model=%s, host=%s]", self.model, self.host)
 
     def chat(
         self,
         messages: list[dict[str, Any]],
         tools: dict[str, Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]], Any]:
-        """Executes chat completion with Ollama."""
+        """Run one chat completion against Ollama.
+
+        Raises:
+            Exception: Any SDK or network error, after logging it.
+        """
         callables = self._extract_tool_callables(tools) if tools else None
 
         kwargs: dict[str, Any] = {
@@ -107,28 +127,19 @@ class OllamaLLM(LLM):
 
         try:
             response = self.client.chat(**kwargs)
-            msg = response.message
 
-            content = msg.content or ""
-            parsed_tool_calls: list[dict[str, Any]] = []
-            raw_calls = getattr(msg, "tool_calls", None) or []
-
-            for call in raw_calls:
-                parsed_tool_calls.append(
-                    {
-                        "name": call.function.name,
-                        "args": call.function.arguments or {},
-                    }
-                )
-
-            return content, parsed_tool_calls, msg
-
-        except Exception as exc:
-            logger.error(
-                f"Error communicating with Ollama model '{self.model}': {exc}",
-                exc_info=True,
-            )
+        except Exception:
+            logger.exception("Error communicating with Ollama model '%s'", self.model)
             raise
+
+        msg = response.message
+        content = msg.content or ""
+        raw_calls = getattr(msg, "tool_calls", None) or []
+        parsed_tool_calls = [
+            {"name": call.function.name, "args": call.function.arguments or {}}
+            for call in raw_calls
+        ]
+        return content, parsed_tool_calls, msg
 
 
 class OpenAILLM(LLM):
@@ -139,7 +150,14 @@ class OpenAILLM(LLM):
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
-    ):
+    ) -> None:
+        """Create an OpenAI (or OpenAI-compatible) client.
+
+        Args:
+            model: Model name. Defaults to ``DEFAULT_OPENAI_MODEL``.
+            api_key: API key. Defaults to ``OPENAI_API_KEY``.
+            base_url: Alternative endpoint for OpenAI-compatible servers.
+        """
         self.model = model or DEFAULT_OPENAI_MODEL
         self.api_key = api_key or OPENAI_API_KEY
         self.base_url = base_url or OPENAI_BASE_URL
@@ -151,18 +169,21 @@ class OpenAILLM(LLM):
             client_kwargs["base_url"] = self.base_url
 
         self.client = openai.OpenAI(**client_kwargs)
-        logger.info(f"Initialized OpenAILLM client [model={self.model}, base_url={self.base_url}]")
+        logger.info(
+            "Initialized OpenAILLM client [model=%s, base_url=%s]", self.model, self.base_url
+        )
 
     def _extract_tool_callables(self, tools: dict[str, Any]) -> list[dict[str, Any]]:
-        """Converts tool objects into standard OpenAI function calling JSON schemas."""
-        openai_tools = []
+        """Convert tools into OpenAI function-calling JSON schemas."""
+        openai_tools: list[dict[str, Any]] = []
         for tool_name, tool_obj in tools.items():
             func = getattr(tool_obj, "func", tool_obj)
             desc = getattr(tool_obj, "description", "") or (
                 func.__doc__ if hasattr(func, "__doc__") else ""
             )
 
-            # If tool has explicit parameters schema
+            # Use the tool's explicit JSON schema when present; otherwise declare an
+            # argument-free function.
             params = getattr(tool_obj, "parameters", None)
             if not params:
                 params = {
@@ -188,7 +209,14 @@ class OpenAILLM(LLM):
         messages: list[dict[str, Any]],
         tools: dict[str, Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]], Any]:
-        """Executes chat completion with OpenAI."""
+        """Run one chat completion against the OpenAI API.
+
+        Tool-call arguments arrive as a JSON string and are decoded; malformed JSON is
+        passed through as ``{"raw_input": ...}`` so the agent can still see it.
+
+        Raises:
+            Exception: Any SDK or network error, after logging it.
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -198,39 +226,31 @@ class OpenAILLM(LLM):
 
         try:
             response = self.client.chat.completions.create(**kwargs)
-            choice = response.choices[0]
-            msg = choice.message
-
-            content = msg.content or ""
-            parsed_tool_calls: list[dict[str, Any]] = []
-
-            raw_calls = getattr(msg, "tool_calls", None) or []
-            for call in raw_calls:
-                fn_args: dict[str, Any] = {}
-                raw_args = getattr(call.function, "arguments", "")
-                if isinstance(raw_args, str) and raw_args.strip():
-                    try:
-                        fn_args = json.loads(raw_args)
-                    except json.JSONDecodeError:
-                        fn_args = {"raw_input": raw_args}
-                elif isinstance(raw_args, dict):
-                    fn_args = raw_args
-
-                parsed_tool_calls.append(
-                    {
-                        "name": call.function.name,
-                        "args": fn_args,
-                    }
-                )
-
-            return content, parsed_tool_calls, msg
-
-        except Exception as exc:
-            logger.error(
-                f"Error communicating with OpenAI model '{self.model}': {exc}",
-                exc_info=True,
-            )
+        except Exception:
+            logger.exception("Error communicating with OpenAI model '%s'", self.model)
             raise
+
+        msg = response.choices[0].message
+        content = msg.content or ""
+        raw_calls = getattr(msg, "tool_calls", None) or []
+        parsed_tool_calls = [
+            {"name": call.function.name, "args": _decode_tool_arguments(call.function)}
+            for call in raw_calls
+        ]
+        return content, parsed_tool_calls, msg
+
+
+def _decode_tool_arguments(function: Any) -> dict[str, Any]:
+    """Return an OpenAI tool call's arguments as a dict, tolerating malformed JSON."""
+    raw_args = getattr(function, "arguments", "")
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str) and raw_args.strip():
+        try:
+            return json.loads(raw_args)
+        except json.JSONDecodeError:
+            return {"raw_input": raw_args}
+    return {}
 
 
 def get_llm(
@@ -240,17 +260,27 @@ def get_llm(
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> LLM:
-    """Factory helper to instantiate the configured LLM client.
+    """Create the LLM client for ``provider`` (default: ``DEFAULT_LLM_PROVIDER``).
 
-    Supports providers: 'ollama' and 'openai'.
+    Args:
+        provider: ``"ollama"`` or ``"openai"`` (case-insensitive).
+        model: Model name override.
+        host: Ollama host override (ignored for OpenAI).
+        api_key: API key override.
+        base_url: OpenAI-compatible endpoint override (ignored for Ollama).
+
+    Returns:
+        A ready-to-use ``LLM`` client.
+
+    Raises:
+        ValueError: If the provider is not supported.
     """
     selected_provider = (provider or DEFAULT_LLM_PROVIDER).lower()
 
     if selected_provider == "openai":
         return OpenAILLM(model=model, api_key=api_key, base_url=base_url)
-    elif selected_provider == "ollama":
+    if selected_provider == "ollama":
         return OllamaLLM(model=model, host=host, api_key=api_key)
-    else:
-        raise ValueError(
-            f"Unsupported LLM provider '{selected_provider}'. Choose 'ollama' or 'openai'."
-        )
+    raise ValueError(
+        f"Unsupported LLM provider '{selected_provider}'. Choose 'ollama' or 'openai'."
+    )

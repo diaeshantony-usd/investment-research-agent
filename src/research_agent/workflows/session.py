@@ -7,53 +7,34 @@ research_agent/memory/session.py and re-exported here for backward compatibility
 
 from __future__ import annotations
 
+import argparse
+import sys
 from typing import Any
 
-# ResearchSession now lives in research_agent.memory.session (persistent SQLite-backed
-# conversation memory). It is re-exported here so existing imports keep working:
-#     from research_agent.workflows import ResearchSession
+from research_agent.agent_framework import format_trajectory_markdown
+
+# ResearchSession lives in research_agent.memory.session (persistent SQLite-backed
+# conversation memory). It is re-exported here so that existing
+# ``from research_agent.workflows import ResearchSession`` imports keep working.
 from research_agent.memory.session import ResearchSession
+
+__all__ = ["ResearchSession", "main"]
 
 
 def _format_trajectory_table(trajectory: list[dict[str, Any]]) -> str:
-    """Formats the execution trajectory as a GitHub-flavored Markdown table."""
-    if not trajectory:
-        return ""
-
-    md_lines = [
-        "| Step | Node | Type | Executor | Tools Called | Summary / Decision |",
-        "| :---: | :--- | :--- | :--- | :--- | :--- |",
-    ]
-    for step in trajectory:
-        s_num = step.get("step", "-")
-        s_node = f"`{step.get('node', '-')}`"
-        s_type = str(step.get("type", "-")).capitalize()
-        s_exec = (
-            step.get("executor") or step.get("agent") or ", ".join(step.get("agents", [])) or "-"
-        )
-        tools = step.get("tools", [])
-        s_tools = ", ".join(f"`{t}`" for t in tools) if tools else "-"
-        summary = step.get("summary", "")
-        if not summary:
-            output_val = step.get("output", "")
-            if output_val:
-                first_line = str(output_val).strip().split("\n")[0]
-                summary = (first_line[:80] + "...") if len(first_line) > 80 else first_line
-            elif step.get("updates"):
-                summary = f"Updated: {list(step['updates'].keys())}"
-            else:
-                summary = "Executed successfully"
-        s_summary = summary.replace("\n", " ").replace("|", "\\|").strip()
-        md_lines.append(f"| {s_num} | {s_node} | {s_type} | {s_exec} | {s_tools} | {s_summary} |")
-
-    return "\n".join(md_lines)
+    """Return the trajectory as a Markdown table (kept for existing notebook imports)."""
+    return format_trajectory_markdown(trajectory)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point for running research queries or interactive sessions."""
-    import argparse
-    import sys
+    """Run one research query, or an interactive multi-turn chat in the terminal.
 
+    Args:
+        argv: Command-line arguments (defaults to ``sys.argv[1:]``).
+
+    Returns:
+        Process exit code (0 on success).
+    """
     parser = argparse.ArgumentParser(
         prog="research-agent",
         description="Institutional-grade Multi-Agent Equity Research System",

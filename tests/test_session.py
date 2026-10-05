@@ -145,13 +145,14 @@ class TestSessionStore:
         store.ensure_thread("a")
         store.update_thread("a", active_ticker="AAPL")
         assert store.get_thread("a")["active_ticker"] == "AAPL"
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Unknown thread fields"):
             store.update_thread("a", bogus=1)
 
     def test_cache_freshness(self, store: SessionStore):
         store.cache_put("a", "brief:NVDA", {"brief": "x"})
         fresh = store.cache_get("a", "brief:NVDA", max_age_seconds=3600)
-        assert fresh["value"] == {"brief": "x"} and fresh["stale"] is False
+        assert fresh["value"] == {"brief": "x"}
+        assert fresh["stale"] is False
         stale = store.cache_get("a", "brief:NVDA", max_age_seconds=-1)
         assert stale["stale"] is True
         assert store.cache_get("a", "brief:AAPL") is None
@@ -177,7 +178,7 @@ class TestSessionStore:
             assert second.count_turns("a") == 1
 
     def test_blank_thread_id_is_rejected(self, store: SessionStore):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="thread_id"):
             store.add_turn("  ", "q", "a")
 
     def test_turn_numbers_are_sequential_per_thread(self, store: SessionStore):
@@ -301,7 +302,8 @@ class TestResearchSession:
         s = make_session(store, memory)
         s.ask("Analyse NVDA", show=False)
         s.reset()
-        assert s.history == [] and s.active_ticker is None
+        assert s.history == []
+        assert s.active_ticker is None
 
     def test_trajectory_is_stored_compactly(self, store, memory):
         s = make_session(store, memory)
@@ -326,7 +328,8 @@ class TestResearchSession:
             s.ask("Analyse NVDA", show=False)
         assert isinstance(excinfo.value.__cause__, ConnectionError)
         turn = store.get_turns("t1")[0]
-        assert turn["kind"] == "error" and turn["ticker"] == "NVDA"
+        assert turn["kind"] == "error"
+        assert turn["ticker"] == "NVDA"
 
     def test_error_turns_are_not_sent_as_context(self, store, memory):
         class FlakyWorkflow(FakeWorkflow):
@@ -344,11 +347,15 @@ class TestResearchSession:
         assert "conversation_context" not in wf.calls[1]
 
     @pytest.mark.parametrize(
-        "kwargs",
-        [{"thread_id": " "}, {"recent_turns": 0}, {"max_summary_chars": 0}],
+        ("kwargs", "message"),
+        [
+            ({"thread_id": " "}, "thread_id"),
+            ({"recent_turns": 0}, "recent_turns"),
+            ({"max_summary_chars": 0}, "max_summary_chars"),
+        ],
     )
-    def test_invalid_configuration_is_rejected(self, store, memory, kwargs):
-        with pytest.raises(ValueError):
+    def test_invalid_configuration_is_rejected(self, store, memory, kwargs, message):
+        with pytest.raises(ValueError, match=message):
             ResearchSession(store=store, memory=memory, workflow=FakeWorkflow(), **kwargs)
 
     def test_show_renders_without_ipython(self, store, memory, capsys, monkeypatch):
