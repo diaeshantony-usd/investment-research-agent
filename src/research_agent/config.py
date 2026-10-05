@@ -52,7 +52,7 @@ DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "ollama")
 
 # Ollama Configuration
 DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemma4:31b")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-oss:120b")
 # An OLLAMA_API_KEY set in the environment or a local .env file overrides this default.
 DEFAULT_API_KEY = os.getenv(
     "OLLAMA_API_KEY", "29556581fc324fe4a0ceba6430989b2a._f3DUv-Ue3XziHJF0asqQDHg"
