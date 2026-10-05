@@ -1,32 +1,18 @@
 """
 workflows/session.py
 ====================
-ResearchSession: Manages multi-turn conversation state, context memory, and question-answering.
+Trajectory formatting and the command-line entry point. ResearchSession is defined in
+research_agent/memory/session.py and re-exported here for backward compatibility.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from IPython.display import Markdown, display
-
-from research_agent.agent_framework import (
-    END,
-    GraphMemory,
-    GraphState,
-    StateGraph,
-)
-from research_agent.agents import (
-    critic_agent,
-    draft_writer_agent,
-    earnings_analyst_agent,
-    market_analyst_agent,
-    news_analyst_agent,
-    planner_agent,
-    refiner_agent,
-)
-from research_agent.config import DEFAULT_MEMORY_FILE
-from research_agent.interfaces import LLM, get_llm
+# ResearchSession now lives in research_agent.memory.session (persistent SQLite-backed
+# conversation memory). It is re-exported here so existing imports keep working:
+#     from research_agent.workflows import ResearchSession
+from research_agent.memory.session import ResearchSession
 
 
 def _format_trajectory_table(trajectory: list[dict[str, Any]]) -> str:
@@ -61,102 +47,6 @@ def _format_trajectory_table(trajectory: list[dict[str, Any]]) -> str:
         md_lines.append(f"| {s_num} | {s_node} | {s_type} | {s_exec} | {s_tools} | {s_summary} |")
 
     return "\n".join(md_lines)
-
-
-class ResearchSession:
-    """Manages multi-turn research conversations and state continuity across follow-up queries."""
-
-    def __init__(
-        self,
-        thread_id: str = "default_session",
-        llm: LLM | None = None,
-        memory: GraphMemory | None = None,
-    ):
-        self.thread_id = thread_id
-        self.llm = llm or get_llm()
-        self.memory = memory or GraphMemory(filepath=str(DEFAULT_MEMORY_FILE))
-        self.history: list[dict[str, str]] = []
-        self.last_state: GraphState | None = None
-        self.last_answer: str = ""
-        self._app = self._build_workflow()
-
-    def _build_workflow(self):
-        planner = planner_agent(llm=self.llm, tools=self.memory.as_tools())
-        earnings_analyst = earnings_analyst_agent(llm=self.llm)
-        market_analyst = market_analyst_agent(llm=self.llm)
-        news_analyst = news_analyst_agent(llm=self.llm)
-        draft_writer = draft_writer_agent(llm=self.llm)
-        critic = critic_agent(llm=self.llm, tools=self.memory.as_tools())
-        refiner = refiner_agent(llm=self.llm)
-
-        workflow = StateGraph(state_schema=GraphState, memory=self.memory, verbose=False)
-        workflow.add_node("planner", planner)
-        workflow.add_node("specialists", [earnings_analyst, market_analyst, news_analyst])
-        workflow.add_node("draft_writer", draft_writer)
-        workflow.add_node("critic", critic)
-        workflow.add_node("refiner", refiner)
-        workflow.set_entry_point("planner")
-
-        def route_planner(state: GraphState) -> str:
-            ans = state.agents.get("ResearchPlanner", "").upper()
-            if "RESEARCH_REQUIRED" in ans:
-                return "specialists"
-            return END
-
-        workflow.add_conditional_edges(
-            "planner",
-            decider=route_planner,
-            route_map={"specialists": "specialists", END: END},
-        )
-        workflow.add_edge("specialists", "draft_writer")
-        workflow.add_edge("draft_writer", "critic")
-
-        def route_critique(state: GraphState) -> str:
-            refine_count = getattr(state, "refine_count", 0)
-            critique_text = state.agents.get("ResearchCritic", "").upper()
-            needs_work = any(
-                k in critique_text
-                for k in ["REVISE", "FAIL", "NEEDS WORK", "UNVERIFIED", "DEFICIENCY"]
-            )
-            if needs_work and refine_count < 2:
-                state.refine_count = refine_count + 1
-                return "refine"
-            return "pass"
-
-        workflow.add_conditional_edges(
-            "critic",
-            decider=route_critique,
-            route_map={"refine": "refiner", "pass": END, "default": END},
-        )
-        workflow.add_edge("refiner", "critic")
-        return workflow.compile()
-
-    def ask(self, question: str, show: bool = True) -> str | None:
-        """Executes inquiry within the conversational session context, showing question, output, and trajectory."""
-        context_payload: dict[str, Any] = {"question": question, "thread_id": self.thread_id}
-        if self.last_state and self.last_state.output:
-            context_payload["prior_research_context"] = self.last_state.output[:1500]
-
-        state = self._app.invoke(context_payload)
-        self.last_state = state
-        answer = state.output or "No response generated."
-        self.last_answer = answer
-
-        self.history.append({"question": question, "answer": answer})
-
-        if show:
-            parts = [
-                f"### 💬 Question\n{question}",
-                f"### 📋 Output\n\n{answer}",
-            ]
-            traj_table = _format_trajectory_table(getattr(state, "trajectory", []))
-            if traj_table:
-                parts.append(f"### 🧭 Trajectory\n\n{traj_table}")
-
-            display(Markdown("\n\n---\n\n".join(parts)))
-            return None
-
-        return answer
 
 
 def main(argv: list[str] | None = None) -> int:
