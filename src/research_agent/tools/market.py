@@ -11,6 +11,7 @@ from typing import Any
 
 from research_agent.agent_framework import tool
 from research_agent.config import logger
+from research_agent.tools.yahoo_finance import get_ticker_details
 
 _MARKET_DATABASE: dict[str, dict[str, Any]] = {
     "NVDA": {
@@ -76,4 +77,45 @@ def get_market_technicals(ticker: str) -> str:
             "ticker": clean_ticker,
             "error": f"No technical data available for '{clean_ticker}'",
         }
+    )
+
+@tool(
+    name="get_stock_price",
+    description=(
+        "Fetches the live current price, previous close, 52-week range and market cap for "
+        "a stock ticker from Yahoo Finance."
+    ),
+)
+def get_stock_price(ticker: str) -> str:
+    """Returns the live current price and basic quote details for a ticker.
+
+    Args:
+        ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
+
+    Returns:
+        JSON with current price, previous close, 52-week range and market
+        cap, or an ``error`` field when Yahoo Finance has no data for the
+        ticker.
+    """
+    clean_ticker = (ticker or "").strip().upper()
+    logger.info("Executing get_stock_price for ticker: %s", clean_ticker)
+
+    try:
+        details = get_ticker_details.func(clean_ticker)
+    except ValueError as exc:
+        logger.warning("get_stock_price failed for %s: %s", clean_ticker, exc)
+        return json.dumps({"ticker": clean_ticker, "error": str(exc)})
+
+    return json.dumps(
+        {
+            "ticker": details["ticker"],
+            "name": details["name"],
+            "currency": details["currency"],
+            "current_price": details["current_price"],
+            "previous_close": details["previous_close"],
+            "fifty_two_week_high": details["fifty_two_week_high"],
+            "fifty_two_week_low": details["fifty_two_week_low"],
+            "market_cap": details["market_cap"],
+        },
+        indent=2,
     )
