@@ -237,3 +237,90 @@ class TestAgentFramework:
         assert ascii_table is not None
         assert "EXECUTION TRAJECTORY TABLE" in ascii_table
         assert "ResearchPlanner" in ascii_table
+
+    def test_agent_system_prompt_grounding_directive(self):
+        tool = Tool(name="fetch_data", description="Fetches data", func=lambda: "data")
+        agent = Agent(name="DataAnalyst", tools=[tool], llm=MockFrameworkLLM())
+        sys_prompt = agent._format_system_prompt()
+        assert "MANDATORY TOOL USE & GROUNDING DIRECTIVE" in sys_prompt
+        assert "fetch_data" in sys_prompt
+
+    def test_planner_role_guardrails(self):
+        from research_agent.agents.planner import PLANNER_ROLE
+
+        assert "CRITICAL DOMAIN GUARDRAILS" in PLANNER_ROLE
+        assert "2+2" in PLANNER_ROLE
+        assert "RESEARCH_REQUIRED" in PLANNER_ROLE
+        assert "cannot answer non-financial questions" in PLANNER_ROLE
+
+    def test_draft_writer_role_data_availability_gate(self):
+        from research_agent.agents.draft_writer import DRAFT_WRITER_ROLE
+
+        assert "DATA AVAILABILITY GATE" in DRAFT_WRITER_ROLE
+        assert "Data Unavailable" in DRAFT_WRITER_ROLE
+        assert "MUST NOT issue an investment stance" in DRAFT_WRITER_ROLE
+
+    def test_workflow_data_unavailable_passes_critic(self):
+        from research_agent.agent_framework import GraphMemory
+        from research_agent.workflows.graph import build_research_workflow
+
+        # Workflow where DraftWriter outputs Coverage Unavailable and Critic passes it
+        llm = MockFrameworkLLM(
+            responses=[
+                ("RESEARCH_REQUIRED: TSLA - evaluate", []),  # Planner
+                ("No earnings data for TSLA", []),  # EarningsAnalyst
+                ("No market technicals for TSLA", []),  # MarketAnalyst
+                ("No news for TSLA", []),  # NewsAnalyst
+                ("# Research Brief: TSLA - Coverage Unavailable", []),  # DraftWriter
+                ("SCORE: 10/10. STATUS: PASS - Data unavailable confirmed.", []),  # Critic
+            ]
+        )
+        mem = GraphMemory()
+        app = build_research_workflow(llm=llm, memory=mem)
+        state = app.invoke({"question": "how is tesla?"})
+
+        executed_nodes = [s["node"] for s in state.trajectory]
+        assert "planner" in executed_nodes
+        assert "specialists" in executed_nodes
+        assert "draft_writer" in executed_nodes
+        assert "critic" in executed_nodes
+        assert "refiner" not in executed_nodes
+        assert "Coverage Unavailable" in state.output
+
+    def test_workflow_uncovered_ticker_with_tools_passes_critic(self):
+        from research_agent.agent_framework import GraphMemory
+        from research_agent.workflows.graph import build_research_workflow
+
+        # Specialists invoke real tools for TSLA which return no data / errors
+        llm = MockFrameworkLLM(
+            responses=[
+                ("RESEARCH_REQUIRED: TSLA - evaluate", []),  # Planner
+                (
+                    "Checking earnings...",
+                    [{"name": "get_earnings_data", "args": {"ticker": "TSLA"}}],
+                ),
+                ("No earnings found for TSLA.", []),
+                (
+                    "Checking market...",
+                    [{"name": "get_market_technicals", "args": {"ticker": "TSLA"}}],
+                ),
+                ("No technicals found for TSLA.", []),
+                ("Checking news...", [{"name": "get_news_data", "args": {"ticker": "TSLA"}}]),
+                ("No news found for TSLA.", []),
+                ("# Research Brief: TSLA - Data Unavailable", []),  # DraftWriter
+                ("SCORE: 10/10. STATUS: PASS - Verified no data.", []),  # Critic
+            ]
+        )
+        mem = GraphMemory()
+        app = build_research_workflow(llm=llm, memory=mem)
+        state = app.invoke({"question": "how is tesla?"})
+
+        executed_nodes = [s["node"] for s in state.trajectory]
+        assert "planner" in executed_nodes
+        assert "specialists" in executed_nodes
+        assert "draft_writer" in executed_nodes
+        assert "critic" in executed_nodes
+        assert "refiner" not in executed_nodes
+        assert "Data Unavailable" in state.output
+
+

@@ -504,3 +504,11 @@ class SessionStore:
             "SELECT key FROM context_cache WHERE thread_id = ? ORDER BY key", (thread_id,)
         )
         return [row["key"] for row in rows]
+
+    def cache_delete(self, thread_id: str, key: str) -> None:
+        """Removes a single cache entry for a thread if present."""
+        self._query(
+            "DELETE FROM context_cache WHERE thread_id = ? AND key = ?",
+            (thread_id, key),
+        )
+

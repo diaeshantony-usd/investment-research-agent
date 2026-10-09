@@ -48,6 +48,11 @@ class FakeWorkflow:
         state.output = f"Answer {n}. Details for: {payload['question'][:40]}"
         if self.brief:
             state.agents["DraftWriter"] = state.output
+        # Simulate AI planner semantic reasoning for ordinal/relative entity resolution
+        q_lower = payload["question"].lower()
+        ctx = payload.get("conversation_context", "")
+        if "first company" in q_lower and "NVDA" in ctx:
+            state.agents["ResearchPlanner"] = "RESEARCH_REQUIRED: NVDA - financials"
         state.trajectory = [
             {
                 "step": 1,
@@ -144,16 +149,20 @@ class TestSessionStore:
     def test_update_thread_rejects_unknown_fields(self, store: SessionStore):
         store.ensure_thread("a")
         store.update_thread("a", active_ticker="AAPL")
-        assert store.get_thread("a")["active_ticker"] == "AAPL"
+        thread_a = store.get_thread("a")
+        assert thread_a is not None
+        assert thread_a["active_ticker"] == "AAPL"
         with pytest.raises(ValueError, match="Unknown thread fields"):
             store.update_thread("a", bogus=1)
 
     def test_cache_freshness(self, store: SessionStore):
         store.cache_put("a", "brief:NVDA", {"brief": "x"})
         fresh = store.cache_get("a", "brief:NVDA", max_age_seconds=3600)
+        assert fresh is not None
         assert fresh["value"] == {"brief": "x"}
         assert fresh["stale"] is False
         stale = store.cache_get("a", "brief:NVDA", max_age_seconds=-1)
+        assert stale is not None
         assert stale["stale"] is True
         assert store.cache_get("a", "brief:AAPL") is None
 
@@ -373,7 +382,215 @@ class TestResearchSession:
         assert s.ask("Analyse NVDA", show=True) is None
         assert "Answer 1" in capsys.readouterr().out
 
+    def test_history_query_multi_turn_accuracy(self, store, memory):
+        wf = FakeWorkflow()
+        s = make_session(store, memory, workflow=wf)
+        s.ask("tell me about nvidia", show=False)
+        assert s.active_ticker == "NVDA"
+        s.ask("tell me about tesla", show=False)
+        assert s.active_ticker == "TSLA"
+        s.ask("on what I'm researching now and before", show=False)
+        assert len(wf.calls) == 3
+        assert "Session Ticker Timeline:" in wf.calls[2]["conversation_context"]
+        assert "Currently Active Ticker: TSLA" in wf.calls[2]["conversation_context"]
+        assert "NVDA -> TSLA" in wf.calls[2]["conversation_context"]
+
+    def test_history_query_without_prior_research(self, store, memory):
+        wf = FakeWorkflow()
+        s = make_session(store, memory, workflow=wf)
+        s.ask("what was I researching before", show=False)
+        assert len(wf.calls) == 1
+        assert wf.calls[0]["question"] == "what was I researching before"
+        assert wf.calls[0]["root_memory"]["tickers"] == []
+
+    def test_first_company_financials_multi_turn_scenario(self, store, memory):
+        """User asks about company 1, then company 2, then financials of first company."""
+        wf = FakeWorkflow()
+        s = make_session(store, memory, workflow=wf)
+
+        # Turn 1: Ask about first company (NVIDIA)
+        s.ask("tell me about nvidia", show=False)
+        assert s.active_ticker == "NVDA"
+        assert wf.calls[0]["active_ticker"] == "NVDA"
+
+        # Turn 2: Ask about second company (Tesla)
+        s.ask("tell me about tesla", show=False)
+        assert s.active_ticker == "TSLA"
+        assert wf.calls[1]["active_ticker"] == "TSLA"
+
+        # Turn 3: Ask about financials of the first company
+        # The AI Planner uses timeline context to dispatch NVDA
+        s.ask("what are the financials of the first company", show=False)
+        assert s.active_ticker == "NVDA"
+        assert len(wf.calls) == 3
+        assert "NVDA -> TSLA" in wf.calls[2]["conversation_context"]
+
+    def test_financials_of_named_company_after_switch(self, store, memory):
+        """User asks about company 1, company 2, then explicitly names company 1 again."""
+        wf = FakeWorkflow()
+        s = make_session(store, memory, workflow=wf)
+
+        s.ask("tell me about nvidia", show=False)
+        assert s.active_ticker == "NVDA"
+
+        s.ask("tell me about tesla", show=False)
+        assert s.active_ticker == "TSLA"
+
+        s.ask("what are the financials of nvidia", show=False)
+        assert s.active_ticker == "NVDA"
+        assert s.last_kind == "switch"
+        assert len(wf.calls) == 3
+        assert wf.calls[2]["active_ticker"] == "NVDA"
+
+    def test_root_memory_structure_and_lifecycle(self, store, memory):
+        """Verify root memory schema: tickers, active_ticker, entity_store, conversation, states."""
+        wf = FakeWorkflow()
+        s = make_session(store, memory, workflow=wf)
+
+        # Pre-turn state
+        rm_empty = s.root_memory
+        assert rm_empty["tickers"] == []
+        assert rm_empty["active_ticker"] is None
+        assert rm_empty["entity_store"] == {}
+        assert rm_empty["conversation"] == []
+        assert rm_empty["states"]["last_kind"] is None
+
+        # Turn 1: First company (NVDA)
+        s.ask("tell me about nvidia", show=False)
+        rm1 = s.root_memory
+        assert rm1["tickers"] == ["NVDA"]
+        assert rm1["active_ticker"] == "NVDA"
+        assert "NVDA" in rm1["entity_store"]
+        assert rm1["entity_store"]["NVDA"]["ticker"] == "NVDA"
+        assert rm1["entity_store"]["NVDA"]["stale"] is False
+        assert len(rm1["conversation"]) == 1
+        assert rm1["conversation"][0]["role"] == "user"
+        assert rm1["conversation"][0]["ticker"] == "NVDA"
+
+        # Turn 2: Second company (TSLA)
+        s.ask("tell me about tesla", show=False)
+        rm2 = s.root_memory
+        assert rm2["tickers"] == ["NVDA", "TSLA"]
+        assert rm2["active_ticker"] == "TSLA"
+        assert "NVDA" in rm2["entity_store"]
+        assert "TSLA" in rm2["entity_store"]
+        assert len(rm2["conversation"]) == 2
+
+        # Turn 3: Switch back via ordinal
+        s.ask("what are the financials of the first company", show=False)
+        rm3 = s.root_memory
+        assert rm3["tickers"] == ["NVDA", "TSLA"]
+        assert rm3["active_ticker"] == "NVDA"
+
+    def test_force_refresh_lifecycle(self, store, memory):
+        """When user asks for new/latest data, query is routed to the AI workflow."""
+        wf = FakeWorkflow()
+        s = make_session(store, memory, workflow=wf)
+
+        # Turn 1: Regular query
+        s.ask("tell me about nvidia", show=False)
+        assert len(wf.calls) == 1
+        assert wf.calls[0]["active_ticker"] == "NVDA"
+
+        # Turn 2: Follow-up query without refresh (reuses prior research context)
+        s.ask("what are its margins?", show=False)
+        assert len(wf.calls) == 2
+        assert "prior_research_context" in wf.calls[1]
+
+        # Turn 3: Explicit refresh query
+        s.ask("get new data for nvidia", show=False)
+        assert len(wf.calls) == 3
+        assert wf.calls[2]["active_ticker"] == "NVDA"
+        assert wf.calls[2]["question"] == "get new data for nvidia"
+
+    def test_coverage_unavailable_lifecycle(self, store, memory):
+        """When a ticker has no data, Coverage Unavailable brief is returned and not cached."""
+        class CoverageWorkflow:
+            def invoke(self, payload: dict[str, Any]) -> GraphState:
+                state = GraphState(question=payload["question"], thread_id=payload["thread_id"])
+                if "tesla" in payload["question"].lower() or payload.get("active_ticker") == "TSLA":
+                    state.output = "# Research Brief: TSLA - Coverage Unavailable"
+                    state.agents["DraftWriter"] = state.output
+                else:
+                    state.output = "# Research Brief: NVDA\n## Executive Summary\nBullish"
+                    state.agents["DraftWriter"] = state.output
+                return state
+
+        s = make_session(store, memory, workflow=CoverageWorkflow())
+
+        # Turn 1: NVDA is successfully researched
+        s.ask("tell me about nvidia", show=False)
+        assert s.root_memory["tickers"] == ["NVDA"]
+        assert "NVDA" in s.root_memory["entity_store"]
+
+        # Turn 2: Tesla has no coverage in tools
+        s.ask("tell me about tesla", show=False)
+        assert "Coverage Unavailable" in (s.last_answer or "")
+        # TSLA should NOT be stored as a valid brief in entity_store
+        assert "TSLA" not in s.root_memory["entity_store"]
+        # Researched tickers list contains only successfully covered tickers
+        assert s.root_memory["tickers"] == ["NVDA"]
+
     def test_backward_compatible_import(self):
         from research_agent.workflows import ResearchSession as Legacy
 
         assert Legacy is ResearchSession
+
+    def test_cli_interactive_generates_unique_thread_id(self, monkeypatch, capsys):
+        from research_agent.workflows.session import main
+
+        # Mock sys.stdin to exit immediately
+        monkeypatch.setattr("sys.stdin.readline", lambda: "exit\n")
+
+        # Run 1
+        main(["--interactive"])
+        out1 = capsys.readouterr().out
+        assert "=== Research Session Started [thread_id: session_" in out1
+
+        # Extract thread_id 1
+        tid1 = out1.split("[thread_id: ")[1].split("]")[0]
+
+        # Run 2
+        main(["-i"])
+        out2 = capsys.readouterr().out
+        assert "=== Research Session Started [thread_id: session_" in out2
+
+        tid2 = out2.split("[thread_id: ")[1].split("]")[0]
+
+        # Each interactive session must receive a distinct unique thread_id
+        assert tid1 != tid2
+
+    def test_cli_interactive_respects_explicit_thread_id(self, monkeypatch, capsys):
+        from research_agent.workflows.session import main
+
+        monkeypatch.setattr("sys.stdin.readline", lambda: "exit\n")
+
+        main(["-i", "--thread-id", "my_custom_session"])
+        out = capsys.readouterr().out
+        assert "=== Research Session Started [thread_id: my_custom_session] ===" in out
+
+    def test_cli_single_query_generates_unique_thread_id(self, monkeypatch):
+        from research_agent.workflows import session as session_module
+
+        created_threads: list[str] = []
+
+        def mock_init(self, thread_id, *args, **kwargs):
+            created_threads.append(thread_id)
+            self.last_answer = "OK"
+
+        monkeypatch.setattr(session_module.ResearchSession, "__init__", mock_init)
+        monkeypatch.setattr(
+            session_module.ResearchSession, "ask", lambda self, q, show=True: None
+        )
+
+        session_module.main(["What about NVDA?"])
+        session_module.main(["What about NVDA?"])
+
+        assert len(created_threads) == 2
+        assert created_threads[0].startswith("cli_")
+        assert created_threads[1].startswith("cli_")
+        assert created_threads[0] != created_threads[1]
+
+
+
+

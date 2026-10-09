@@ -5,7 +5,7 @@ Conversation memory for the research agent.
 
 * ``SessionStore``    - SQLite store of threads, turns and cached context (short-term memory)
 * ``ResearchSession`` - multi-turn session used by the notebook, CLI and chat UI
-* ``extract_tickers`` / ``is_follow_up`` - rule-based company and follow-up detection
+* ``extract_tickers`` / ``is_follow_up`` - company name/symbol and pronoun detection
 """
 
 from __future__ import annotations

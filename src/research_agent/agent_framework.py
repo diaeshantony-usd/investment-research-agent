@@ -316,7 +316,15 @@ class Agent:
         tool_descs = "\n".join(f"- {t.name}: {t.description}" for t in self.tools.values())
         header = f"Current Time: {now_str}\nRole: {self.role}\n"
         if tool_descs:
-            header += f"\nAvailable Tools:\n{tool_descs}\n"
+            header += (
+                f"\nAvailable Tools:\n{tool_descs}\n\n"
+                "MANDATORY TOOL USE & GROUNDING DIRECTIVE:\n"
+                "You MUST execute your available tools to retrieve factual data. "
+                "Never invent, assume, or hallucinate metrics, financial figures, or dates not "
+                "returned by your tools. If data for a ticker or query is not found in the tools, "
+                "explicitly report that data is unavailable from the tools rather than fabricating "
+                "answers.\n"
+            )
         return f"{header}\n{self.system_prompt}".strip()
 
     def _extract_tool_callables(self) -> Any:

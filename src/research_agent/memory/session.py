@@ -107,10 +107,21 @@ class TurnKind(str, Enum):
     @property
     def runs_workflow(self) -> bool:
         """True for kinds that are answered by the agent workflow."""
-        return self not in (TurnKind.EMPTY, TurnKind.NEEDS_COMPANY, TurnKind.ERROR)
+        return self not in (
+            TurnKind.EMPTY,
+            TurnKind.NEEDS_COMPANY,
+            TurnKind.ERROR,
+        )
 
     def __str__(self) -> str:
         return self.value
+
+
+def _ticker_turn_kind(active: str | None, ticker: str) -> TurnKind:
+    """Return NEW, SAME or SWITCH based on how ticker compares to the active one."""
+    if active is None:
+        return TurnKind.NEW
+    return TurnKind.SAME if ticker == active else TurnKind.SWITCH
 
 
 class Workflow(Protocol):
@@ -257,6 +268,54 @@ class ResearchSession:
         thread = self.store.get_thread(self.thread_id)
         return (thread["summary"] or "") if thread else ""
 
+    @property
+    def root_memory(self) -> dict[str, Any]:
+        """Return the structured Root Memory state for this session.
+
+        Schema:
+        - tickers: unique tickers researched in chronological order
+        - active_ticker: currently active ticker symbol (or None)
+        - entity_store: dict mapping ticker -> cached brief, timestamp, and freshness
+        - conversation: recent user/assistant turns
+        - states: last workflow execution metadata
+        """
+        tickers = self._distinct_research_tickers()
+        active = self.active_ticker
+        entity_store: dict[str, Any] = {}
+        for t in tickers:
+            cached = self.store.cache_get(
+                self.thread_id, f"brief:{t}", max_age_seconds=self.cache_max_age
+            )
+            if cached:
+                entity_store[t] = {
+                    "ticker": t,
+                    "fetched_at": cached["fetched_at"],
+                    "age_seconds": cached["age_seconds"],
+                    "stale": cached["stale"],
+                    "brief": cached["value"].get("brief", "")[: self.max_brief_chars],
+                }
+        turns = [
+            {
+                "turn_no": t["turn_no"],
+                "role": "user",
+                "question": t["question"],
+                "answer": t["answer"],
+                "ticker": t.get("ticker"),
+                "kind": t.get("kind"),
+            }
+            for t in self.store.get_turns(self.thread_id, last=self.recent_turns)
+        ]
+        return {
+            "tickers": tickers,
+            "active_ticker": active,
+            "entity_store": entity_store,
+            "conversation": turns,
+            "states": {
+                "last_state_id": getattr(self.last_state, "state_unique_id", None),
+                "last_kind": str(self.last_kind) if self.last_kind else None,
+            },
+        }
+
     # ------------------------------------------------------------------ public API
 
     def ask(self, question: str | None, show: bool = True) -> str | None:
@@ -313,11 +372,24 @@ class ResearchSession:
         self.last_state = state
         answer = getattr(state, "output", "") or "No response generated."
 
+        # If the workflow Planner decided on a specific ticker via dispatch
+        # (e.g. from semantic reasoning), keep recorded ticker synchronized with Planner.
+        effective_ticker = resolution.ticker
+        if hasattr(state, "agents") and "ResearchPlanner" in state.agents:
+            plan_text = state.agents["ResearchPlanner"]
+            if "RESEARCH_REQUIRED" in plan_text.upper():
+                plan_tickers = extract_tickers(plan_text)
+                if plan_tickers:
+                    planned_ticker = plan_tickers[0]
+                    if planned_ticker != effective_ticker:
+                        effective_ticker = planned_ticker
+                        self.store.update_thread(self.thread_id, active_ticker=planned_ticker)
+
         # Cache full briefs per ticker so follow-up questions can reuse them.
-        if resolution.ticker and _produced_brief(state):
+        if effective_ticker and _produced_brief(state):
             self.store.cache_put(
                 self.thread_id,
-                f"brief:{resolution.ticker}",
+                f"brief:{effective_ticker}",
                 {"question": resolution.question, "brief": answer},
             )
 
@@ -327,7 +399,7 @@ class ResearchSession:
             kind=resolution.kind,
             show=show,
             resolved=resolution.question,
-            ticker=resolution.ticker,
+            ticker=effective_ticker,
             trajectory=getattr(state, "trajectory", None) or [],
         )
 
@@ -390,19 +462,14 @@ class ResearchSession:
         active = self.active_ticker
         mentioned = extract_tickers(text)
 
-        # Case 1: the question names a company. The first one mentioned becomes active.
+        # Case 1: the question explicitly names a company. The first one mentioned becomes active.
         if mentioned:
             ticker = mentioned[0]
-            if active is None:
-                kind = TurnKind.NEW
-            elif ticker == active:
-                kind = TurnKind.SAME
-            else:
-                kind = TurnKind.SWITCH
+            kind = _ticker_turn_kind(active, ticker)
             self.store.update_thread(self.thread_id, active_ticker=ticker)
             return _Resolution(text, ticker, kind)
 
-        # Case 2: no company named, but the question points back at earlier turns.
+        # Case 2: pronoun follow-up referring to the active company (e.g. "what about its debt?").
         if is_follow_up(text):
             if active:
                 # Make the reference explicit so every agent sees the same company.
@@ -411,8 +478,23 @@ class ResearchSession:
             if needs_company_reference(text):
                 return _Resolution(text, None, TurnKind.NEEDS_COMPANY)
 
-        # Case 3: a general finance question with no company involved.
-        return _Resolution(text, None, TurnKind.GENERAL)
+        # Case 3: general financial questions, history inquiries, multi-turn reasoning,
+        # or relative references interpreted directly by the AI Planner using conversation context.
+        return _Resolution(text, active, TurnKind.GENERAL)
+
+    def _distinct_research_tickers(self) -> list[str]:
+        """Return the distinct tickers researched so far in this thread, in chronological order."""
+        research_turns = [
+            t for t in self.store.get_turns(self.thread_id) if _is_research_turn(t["kind"])
+        ]
+        valid_turns = [
+            t
+            for t in research_turns
+            if "COVERAGE UNAVAILABLE" not in str(t.get("answer", "")).upper()
+            and "DATA UNAVAILABLE" not in str(t.get("answer", "")).upper()
+        ]
+        ticker_sequence = [str(t["ticker"]) for t in valid_turns if t.get("ticker")]
+        return list(dict.fromkeys(ticker_sequence))
 
     def _build_payload(self, question: str, ticker: str | None) -> dict[str, Any]:
         """Build the workflow input: the question plus compact conversation context.
@@ -420,7 +502,11 @@ class ResearchSession:
         Extra keys are surfaced to every agent by the workflow as "Current Context".
         Empty values are omitted so a first question carries no noise.
         """
-        payload: dict[str, Any] = {"question": question, "thread_id": self.thread_id}
+        payload: dict[str, Any] = {
+            "question": question,
+            "thread_id": self.thread_id,
+            "root_memory": self.root_memory,
+        }
         if ticker:
             payload["active_ticker"] = ticker
 
@@ -439,19 +525,38 @@ class ResearchSession:
         if cached is None:
             return {}
 
+        brief_text = str(cached["value"].get("brief", ""))
+        # If cache contains an unavailable data notice, purge it and return empty
+        if (
+            "COVERAGE UNAVAILABLE" in brief_text.upper()
+            or "DATA UNAVAILABLE" in brief_text.upper()
+        ):
+            self.store.cache_delete(self.thread_id, f"brief:{ticker}")
+            return {}
+
         hours = cached["age_seconds"] / _SECONDS_PER_HOUR
         fetched = f"{cached['fetched_at']} ({hours:.1f} h ago)"
         if cached["stale"]:
             # Prices move quickly; warn the agents not to treat old numbers as current.
             fetched += " - STALE: refresh market data before relying on prices"
+
         return {
-            "prior_research_context": cached["value"]["brief"][: self.max_brief_chars],
+            "prior_research_context": brief_text[: self.max_brief_chars],
             "prior_research_fetched": fetched,
         }
 
     def _conversation_context(self) -> str:
         """Return the rolling summary plus the most recent turns, as plain text."""
         parts: list[str] = []
+        distinct_tickers = self._distinct_research_tickers()
+        active = self.active_ticker
+        if distinct_tickers:
+            parts.append(
+                "Session Ticker Timeline:\n"
+                f"- Currently Active Ticker: {active or 'None'}\n"
+                f"- Tickers Researched (chronological order): {' -> '.join(distinct_tickers)}"
+            )
+
         if summary := self.summary:
             parts.append(f"Earlier in this conversation:\n{summary}")
 
@@ -572,8 +677,11 @@ def _is_research_turn(kind: str) -> bool:
 
 
 def _produced_brief(state: Any) -> bool:
-    """Return True if any brief-writing agent ran in this workflow state."""
+    """Return True if any brief-writing agent produced an actual research brief."""
     agents = getattr(state, "agents", None) or {}
+    output = getattr(state, "output", "") or ""
+    if "COVERAGE UNAVAILABLE" in output.upper() or "DATA UNAVAILABLE" in output.upper():
+        return False
     return any(name in agents for name in _BRIEF_AGENTS)
 
 

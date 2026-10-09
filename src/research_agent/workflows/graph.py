@@ -49,7 +49,7 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
 
     Args:
         llm: Chat model client shared by every agent.
-        memory: Checkpoint store; the planner and critic also receive its tools.
+        memory: Checkpoint store; the critic receives its tools.
 
     Returns:
         The compiled graph. Call ``invoke(payload)`` to run it.

@@ -51,6 +51,7 @@ ignore = [
     "ANN401",   # Any is deliberate where provider SDK objects are passed through
     "PLC0415",  # local imports are used on purpose for optional/heavy dependencies
     "PLR0913",  # agent factories and constructors take many optional settings
+    "PLR0917",  # constructors and formatters take many settings
     "PLR2004",  # small literals in formatting code are clearer inline
     "TRY003",   # descriptive messages in raise statements are preferred here
 ]
