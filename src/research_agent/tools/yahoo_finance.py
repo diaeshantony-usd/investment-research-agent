@@ -11,9 +11,12 @@ directly:
 - ``download_price_history``  - bulk OHLCV for one or more tickers via ``yf.download()``
 - ``get_financial_statements``- annual/quarterly income statement, balance sheet, cash flow
 
-Every function raises ``ValueError`` on an unknown/invalid ticker or empty
-data instead of returning a silent empty result; ``Tool.execute()`` catches
-that and reports a clear error back to the agent instead of crashing the run.
+``get_ticker_details`` and ``get_financial_statements`` fall back to Alpha
+Vantage (``tools/alpha_vantage.py``) when yfinance raises and
+``ALPHA_VANTAGE_KEY`` is configured; the returned dict's ``source`` field
+says which one actually answered. Every function still raises ``ValueError``
+when neither source has data; ``Tool.execute()`` catches that and reports a
+clear error back to the agent instead of crashing the run.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ import yfinance as yf
 
 from research_agent.agent_framework import tool
 from research_agent.config import logger
+from research_agent.tools import alpha_vantage
+from research_agent.tools.cache import ONE_DAY, ONE_HOUR, SIX_HOURS, cached
 
 
 def get_ticker(ticker: str) -> yf.Ticker:
@@ -46,27 +51,8 @@ def get_ticker(ticker: str) -> yf.Ticker:
     return yf.Ticker(clean)
 
 
-@tool(
-    name="get_ticker_details",
-    description=(
-        "Retrieves a company's live profile from Yahoo Finance: name, exchange, sector, "
-        "industry, market cap, current price, 52-week range, beta and P/E ratios."
-    ),
-)
-def get_ticker_details(ticker: str) -> dict[str, Any]:
-    """Return company profile and key ratios for a ticker.
-
-    Args:
-        ticker: Stock symbol (e.g. 'NVDA').
-
-    Returns:
-        Name, exchange, currency, sector, industry, market cap, current
-        price, 52-week range, beta and P/E ratios.
-
-    Raises:
-        ValueError: If Yahoo Finance has no profile for this ticker.
-    """
-    ticker = (ticker or "").strip().upper()
+def _get_ticker_details_yfinance(ticker: str) -> dict[str, Any]:
+    """Yfinance's half of ``get_ticker_details``; raises ``ValueError`` on failure."""
     t = get_ticker(ticker)
     logger.info("yfinance: fetching ticker details for %s", ticker)
 
@@ -101,12 +87,64 @@ def get_ticker_details(ticker: str) -> dict[str, Any]:
 
 
 @tool(
+    name="get_ticker_details",
+    description=(
+        "Retrieves a company's live profile - name, exchange, sector, industry, market cap, "
+        "current price, 52-week range, beta and P/E ratios - from Yahoo Finance, falling "
+        "back to Alpha Vantage if Yahoo Finance has no data for the ticker."
+    ),
+)
+@cached("get_ticker_details", ttl_seconds=ONE_HOUR)
+def get_ticker_details(ticker: str) -> dict[str, Any]:
+    """Return company profile and key ratios for a ticker.
+
+    Tries yfinance first; if it raises and ``ALPHA_VANTAGE_KEY`` is set,
+    falls back to Alpha Vantage's OVERVIEW/GLOBAL_QUOTE endpoints.
+
+    Args:
+        ticker: Stock symbol (e.g. 'NVDA').
+
+    Returns:
+        Name, exchange, currency, sector, industry, market cap, current
+        price, 52-week range, beta, P/E ratios, and a ``source`` field
+        naming which provider actually answered.
+
+    Raises:
+        ValueError: If neither yfinance nor Alpha Vantage has a profile for
+            this ticker.
+    """
+    clean = (ticker or "").strip().upper()
+
+    try:
+        details = _get_ticker_details_yfinance(clean)
+    except Exception as yf_exc:
+        if not alpha_vantage.is_configured():
+            raise ValueError(f"No ticker details found for '{clean}': {yf_exc}") from yf_exc
+        try:
+            details = alpha_vantage.get_ticker_details(clean)
+        except Exception as av_exc:
+            raise ValueError(
+                f"No ticker details found for '{clean}': yfinance error: {yf_exc}; "
+                f"Alpha Vantage fallback error: {av_exc}"
+            ) from av_exc
+        else:
+            details["source"] = "alpha_vantage"
+            logger.warning(
+                "yfinance failed for %s (%s); served Alpha Vantage fallback", clean, yf_exc
+            )
+    else:
+        details["source"] = "yfinance"
+    return details
+
+
+@tool(
     name="get_historical_data",
     description=(
         "Retrieves daily/weekly/monthly OHLCV price candles for one stock ticker from Yahoo "
         "Finance over a lookback window, e.g. period='6mo', interval='1d'."
     ),
 )
+@cached("get_historical_data", ttl_seconds=SIX_HOURS)
 def get_historical_data(
     ticker: str, period: str = "6mo", interval: str = "1d"
 ) -> list[dict[str, Any]]:
@@ -144,6 +182,7 @@ def get_historical_data(
         "string (e.g. 'NVDA, AAPL'), or a list of symbols."
     ),
 )
+@cached("download_price_history", ttl_seconds=SIX_HOURS)
 def download_price_history(
     tickers: str | list[str], period: str = "6mo", interval: str = "1d"
 ) -> dict[str, list[dict[str, Any]]]:
@@ -194,41 +233,75 @@ def download_price_history(
     return result
 
 
-@tool(
-    name="get_financial_statements",
-    description=(
-        "Retrieves annual and quarterly financial statements for a ticker from Yahoo "
-        "Finance: income statement, balance sheet and cash flow line items by period."
-    ),
-)
-def get_financial_statements(ticker: str) -> dict[str, Any]:
-    """Return annual and quarterly financial statements for a ticker.
-
-    Args:
-        ticker: Stock symbol (e.g. 'NVDA').
-
-    Returns:
-        ``annual_income_statement``, ``quarterly_income_statement``,
-        ``annual_balance_sheet`` and ``annual_cash_flow``, each a list of
-        per-period line-item dicts (most recent period first, as yfinance
-        returns them).
-
-    Raises:
-        ValueError: If none of the four statements have any data.
-    """
-    clean = (ticker or "").strip().upper()
-    t = get_ticker(clean)
-    logger.info("yfinance: fetching financial statements for %s", clean)
+def _get_financial_statements_yfinance(ticker: str) -> dict[str, Any]:
+    """Yfinance's half of ``get_financial_statements``; raises ``ValueError`` on failure."""
+    t = get_ticker(ticker)
+    logger.info("yfinance: fetching financial statements for %s", ticker)
 
     statements = {
-        "ticker": clean,
+        "ticker": ticker,
         "annual_income_statement": _statement_to_records(t.financials),
         "quarterly_income_statement": _statement_to_records(t.quarterly_financials),
         "annual_balance_sheet": _statement_to_records(t.balance_sheet),
         "annual_cash_flow": _statement_to_records(t.cashflow),
     }
     if not any(statements[k] for k in statements if k != "ticker"):
-        raise ValueError(f"No financial statements found for '{clean}'")
+        raise ValueError(f"No financial statements found for '{ticker}'")
+    return statements
+
+
+@tool(
+    name="get_financial_statements",
+    description=(
+        "Retrieves annual and quarterly income statement, balance sheet and cash flow line "
+        "items for a ticker from Yahoo Finance, falling back to Alpha Vantage if Yahoo "
+        "Finance has no statements for the ticker."
+    ),
+)
+@cached("get_financial_statements", ttl_seconds=ONE_DAY)
+def get_financial_statements(ticker: str) -> dict[str, Any]:
+    """Return annual and quarterly financial statements for a ticker.
+
+    Tries yfinance first; if it raises and ``ALPHA_VANTAGE_KEY`` is set,
+    falls back to Alpha Vantage's INCOME_STATEMENT/BALANCE_SHEET/CASH_FLOW
+    endpoints.
+
+    Args:
+        ticker: Stock symbol (e.g. 'NVDA').
+
+    Returns:
+        ``annual_income_statement``, ``quarterly_income_statement``,
+        ``annual_balance_sheet`` and ``annual_cash_flow`` (each a list of
+        per-period line-item dicts), plus a ``source`` field naming which
+        provider actually answered. Alpha Vantage has no quarterly balance
+        sheet/cash flow equivalent wired up, so those stay annual-only
+        regardless of source.
+
+    Raises:
+        ValueError: If neither yfinance nor Alpha Vantage has statements for
+            this ticker.
+    """
+    clean = (ticker or "").strip().upper()
+
+    try:
+        statements = _get_financial_statements_yfinance(clean)
+    except Exception as yf_exc:
+        if not alpha_vantage.is_configured():
+            raise ValueError(f"No financial statements found for '{clean}': {yf_exc}") from yf_exc
+        try:
+            statements = alpha_vantage.get_financial_statements(clean)
+        except Exception as av_exc:
+            raise ValueError(
+                f"No financial statements found for '{clean}': yfinance error: {yf_exc}; "
+                f"Alpha Vantage fallback error: {av_exc}"
+            ) from av_exc
+        else:
+            statements["source"] = "alpha_vantage"
+            logger.warning(
+                "yfinance failed for %s (%s); served Alpha Vantage fallback", clean, yf_exc
+            )
+    else:
+        statements["source"] = "yfinance"
     return statements
 
 

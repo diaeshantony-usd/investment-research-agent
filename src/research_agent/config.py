@@ -55,7 +55,7 @@ DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-oss:120b")
 # An OLLAMA_API_KEY set in the environment or a local .env file overrides this default.
 DEFAULT_API_KEY = os.getenv(
-    "OLLAMA_API_KEY", "29556581fc324fe4a0ceba6430989b2a._f3DUv-Ue3XziHJF0asqQDHg"
+    "OLLAMA_API_KEY", "19878a5a398b40c3aa12cf680fd6d6c1.VUB6r7DsyZxgZP1xgPvnRs4q"
 )
 
 # OpenAI Configuration
@@ -64,7 +64,7 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", None)
 DEFAULT_OPENAI_MODEL = os.getenv("DEFAULT_OPENAI_MODEL", "gpt-4o-mini")
 
 # External Data API Keys (Free tiers / placeholders)
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "9fff59025e0b47d6b2fbb7eab8f74156")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
 
