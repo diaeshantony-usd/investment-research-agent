@@ -65,8 +65,8 @@ DEFAULT_OPENAI_MODEL = os.getenv("DEFAULT_OPENAI_MODEL", "gpt-4o-mini")
 
 # External Data API Keys (Free tiers / placeholders)
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "9fff59025e0b47d6b2fbb7eab8f74156")
-FRED_API_KEY = os.getenv("FRED_API_KEY", "")
-ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
+FRED_API_KEY = os.getenv("FRED_API_KEY", "640d07a19c790cf1352a85c1b92fefd2")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "XALMWIXET7I4VJ1D")
 
 # Execution Defaults
 DEFAULT_MAX_ITERATIONS = int(os.getenv("DEFAULT_MAX_ITERATIONS", "10"))

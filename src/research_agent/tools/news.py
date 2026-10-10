@@ -40,7 +40,7 @@ _MAX_ARTICLES = 10
 # Strips a trailing legal suffix ("NVIDIA Corporation" -> "NVIDIA", "Apple
 # Inc." -> "Apple") so the NewsAPI query reads like prose, not a filing name.
 _LEGAL_SUFFIX_RE = re.compile(
-    r"\s*,?\s*\b(Corporation|Corp|Incorporated|Inc|Company|Co|Holdings?|Group|"
+    r"\s*,?\s*(?:&|and)?\s*\b(Corporation|Corp|Incorporated|Inc|Company|Co|Holdings?|Group|"
     r"Limited|Ltd|PLC|LLC|L\.P\.)\.?\s*$",
     re.IGNORECASE,
 )
@@ -68,7 +68,7 @@ def _search_term(ticker: str) -> str:
     clean = (ticker or "").strip().upper()
     try:
         details = get_ticker_details.func(clean)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any lookup failure just falls back to the raw ticker
         logger.warning(
             "Could not resolve a company name for '%s' (%s); searching the ticker as-is",
             clean,

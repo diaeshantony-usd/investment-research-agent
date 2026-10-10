@@ -30,5 +30,7 @@ data/cache/*.json
 
 # Local Dev Scripts
 scripts/
+build/
+.idea
 
 
