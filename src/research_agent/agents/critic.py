@@ -2,6 +2,10 @@
 agents/critic.py
 ================
 Critic Agent: Audits research briefs on grounding, factual accuracy, and balance.
+
+This is the stand-alone, LLM-only critic. The research graph uses the review loop in
+``workflows/review_loop.py`` instead, which checks every figure against the raw tool
+data in code before an LLM judges the rest.
 """
 
 from __future__ import annotations
@@ -51,7 +55,8 @@ def critic_agent(
     """Create the Critic agent that scores a draft brief.
 
     It returns ``SCORE: x/10`` and ``STATUS: PASS`` or ``STATUS: REVISE`` with numbered
-    fixes; ``REVISE`` sends the draft to the Refiner.
+    fixes. Kept for stand-alone use; the research graph reviews briefs with
+    ``workflows.review_loop.Critic``.
 
     Args:
         model: Model name, or an ``LLM`` client to use directly.

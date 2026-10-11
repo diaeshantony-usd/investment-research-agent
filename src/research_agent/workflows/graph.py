@@ -3,11 +3,10 @@ workflows/graph.py
 ==================
 Builds the compiled multi-agent research workflow:
 
-    planner -> (specialists in parallel) -> draft_writer -> critic <-> refiner
+    planner -> (specialists in parallel) -> draft_writer -> critic <-> refiner -> release
 
-Author of the graph wiring: N L N Sai Krishna Akula (moved here from
-``workflows/session.py`` with routing behaviour unchanged, so that ``ResearchSession``
-can be developed separately).
+Graph wiring: N L N Sai Krishna Akula. Critic / Refiner review loop
+(``workflows/review_loop.py``): Diaesh Antony.
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from research_agent.agent_framework import (
     StateGraph,
 )
 from research_agent.agents import (
-    critic_agent,
     draft_writer_agent,
     earnings_analyst_agent,
     market_analyst_agent,
@@ -30,12 +28,7 @@ from research_agent.agents import (
     planner_agent,
     refiner_agent,
 )
-
-# The critic asks for another revision when its verdict contains any of these markers.
-_REVISION_MARKERS = ("REVISE", "FAIL", "NEEDS WORK", "UNVERIFIED", "DEFICIENCY")
-
-# Upper bound on refiner -> critic loops, so a strict critic cannot loop forever.
-_MAX_REFINEMENTS = 2
+from research_agent.workflows.review_loop import make_review_nodes
 
 
 def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph:
@@ -44,12 +37,16 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
     Flow::
 
         planner --(RESEARCH_REQUIRED)--> specialists (earnings, market, news in parallel)
-                --> draft_writer --> critic --(needs work)--> refiner --> critic ...
-        planner --(otherwise)--> END              critic --(pass)--> END
+                --> draft_writer --> critic --(revise)--> refiner --> critic ...
+                                     critic --(pass / stop rule)--> release --> END
+        planner --(otherwise)--> END
+
+    The critic checks the brief against the raw tool data and the refiner fixes what it
+    flags; stopping rules and release are described in ``workflows/review_loop.py``.
 
     Args:
         llm: Chat model client shared by every agent.
-        memory: Checkpoint store; the critic receives its tools.
+        memory: Checkpoint store for finished runs.
 
     Returns:
         The compiled graph. Call ``invoke(payload)`` to run it.
@@ -59,15 +56,17 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
     market_analyst = market_analyst_agent(llm=llm)
     news_analyst = news_analyst_agent(llm=llm)
     draft_writer = draft_writer_agent(llm=llm)
-    critic = critic_agent(llm=llm, tools=memory.as_tools())
-    refiner = refiner_agent(llm=llm)
+    critic_node, refiner_node, release_node, route_review = make_review_nodes(
+        llm=llm, refiner=refiner_agent(llm=llm)
+    )
 
     workflow = StateGraph(state_schema=GraphState, memory=memory, verbose=False)
     workflow.add_node("planner", planner)
     workflow.add_node("specialists", [earnings_analyst, market_analyst, news_analyst])
     workflow.add_node("draft_writer", draft_writer)
-    workflow.add_node("critic", critic)
-    workflow.add_node("refiner", refiner)
+    workflow.add_node("critic", critic_node)
+    workflow.add_node("refiner", refiner_node)
+    workflow.add_node("release", release_node)
     workflow.set_entry_point("planner")
 
     def route_planner(state: GraphState) -> str:
@@ -85,20 +84,11 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
     workflow.add_edge("specialists", "draft_writer")
     workflow.add_edge("draft_writer", "critic")
 
-    def route_critique(state: GraphState) -> str:
-        """Send the draft back to the refiner until it passes or the loop limit is hit."""
-        refine_count = getattr(state, "refine_count", 0)
-        critique_text = state.agents.get("ResearchCritic", "").upper()
-        needs_work = any(marker in critique_text for marker in _REVISION_MARKERS)
-        if needs_work and refine_count < _MAX_REFINEMENTS:
-            state.refine_count = refine_count + 1
-            return "refine"
-        return "pass"
-
     workflow.add_conditional_edges(
         "critic",
-        decider=route_critique,
-        route_map={"refine": "refiner", "pass": END, "default": END},
+        decider=route_review,
+        route_map={"refine": "refiner", "release": "release", "default": "release"},
     )
     workflow.add_edge("refiner", "critic")
+    workflow.add_edge("release", END)
     return workflow.compile()

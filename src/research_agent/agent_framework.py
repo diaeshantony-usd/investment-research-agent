@@ -484,6 +484,24 @@ class Agent:
 # ===========================================================================
 
 
+def store_tool_result(store: dict[str, Any], tool_name: str, value: Any) -> str:
+    """Save one tool result in an agent's ``GraphState.tools`` entry without overwriting.
+
+    The first call of a tool is stored under its name; repeated calls (an analyst
+    searching both the 10-K and the 10-Q) are kept as ``name#2``, ``name#3``, ... so the
+    Critic can still verify figures taken from any of them.
+
+    Returns:
+        The key the result was stored under.
+    """
+    key, n = tool_name, 1
+    while key in store:
+        n += 1
+        key = f"{tool_name}#{n}"
+    store[key] = value
+    return key
+
+
 @dataclass
 class GraphState:
     """Central blackboard state object passed across nodes in the StateGraph."""
@@ -496,6 +514,8 @@ class GraphState:
     tools: dict[str, Any] = field(default_factory=dict)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
     refine_count: int = 0
+    # Critic / Refiner review history, filled by ``workflows/review_loop.py``.
+    review: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the declared fields as a JSON-serialisable dictionary."""
@@ -962,7 +982,7 @@ class CompiledStateGraph:
                 if isinstance(val, str):
                     with contextlib.suppress(json.JSONDecodeError, TypeError):
                         val = json.loads(val)
-                state.tools[agent.name][tool_name] = val
+                store_tool_result(state.tools[agent.name], tool_name, val)
 
     def _execute_parallel_node(
         self,

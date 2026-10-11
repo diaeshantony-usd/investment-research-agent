@@ -15,6 +15,7 @@ they're normally quoted.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from research_agent.agent_framework import tool
@@ -46,7 +47,24 @@ def _client() -> Any:
 
     from fredapi import Fred  # local import: optional/heavy dependency
 
+    _use_certifi_bundle()
     return Fred(api_key=FRED_API_KEY)
+
+
+def _use_certifi_bundle() -> None:
+    """Point HTTPS certificate checks at the ``certifi`` CA bundle, unless one is set.
+
+    ``fredapi`` downloads with ``urllib``, which relies on the system certificate
+    store. Some Python installs on macOS (python.org builds, some conda setups) have
+    none configured, so every FRED request fails with ``CERTIFICATE_VERIFY_FAILED``.
+    ``certifi`` is already installed with ``requests``. A bundle the user configured
+    through ``SSL_CERT_FILE`` is left as is.
+    """
+    try:
+        import certifi
+    except ImportError:  # pragma: no cover - certifi ships with requests
+        return
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 
 def _latest_value(fred: Any, series_id: str) -> tuple[Any, float]:

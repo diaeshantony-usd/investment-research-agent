@@ -287,7 +287,7 @@ class TestAgentFramework:
                 ("No market technicals for TSLA", []),  # MarketAnalyst
                 # NewsAnalyst: the prompt chain finds no articles, so it makes no LLM call.
                 ("# Research Brief: TSLA - Coverage Unavailable", []),  # DraftWriter
-                ("SCORE: 10/10. STATUS: PASS - Data unavailable confirmed.", []),  # Critic
+                # Critic: a data-unavailable notice passes without an LLM call.
             ]
         )
         mem = GraphMemory()
@@ -300,6 +300,7 @@ class TestAgentFramework:
         assert "draft_writer" in executed_nodes
         assert "critic" in executed_nodes
         assert "refiner" not in executed_nodes
+        assert executed_nodes[-1] == "release"
         assert "Coverage Unavailable" in state.output
 
     def test_workflow_uncovered_ticker_with_tools_passes_critic(self, monkeypatch):
@@ -325,7 +326,7 @@ class TestAgentFramework:
                 # NewsAnalyst: the prompt chain calls get_news_data itself and, with no
                 # articles, makes no LLM call.
                 ("# Research Brief: TSLA - Data Unavailable", []),  # DraftWriter
-                ("SCORE: 10/10. STATUS: PASS - Verified no data.", []),  # Critic
+                # Critic: a data-unavailable notice passes without an LLM call.
             ]
         )
         mem = GraphMemory()
