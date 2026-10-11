@@ -37,6 +37,11 @@ from research_agent.tools.yahoo_finance import get_ticker_details
 
 _MAX_ARTICLES = 10
 
+# Package registries whose page titles sometimes collide with a ticker or company
+# name (e.g. a PyPI project literally named after a stock symbol), producing
+# false-positive "news" matches under a title-only search.
+_EXCLUDED_DOMAINS = "pypi.org,npmjs.com,rubygems.org"
+
 # Strips a trailing legal suffix ("NVIDIA Corporation" -> "NVIDIA", "Apple
 # Inc." -> "Apple") so the NewsAPI query reads like prose, not a filing name.
 _LEGAL_SUFFIX_RE = re.compile(
@@ -80,6 +85,21 @@ def _search_term(ticker: str) -> str:
     return _simplify_company_name(name) if name else clean
 
 
+def _title_query(name: str, ticker: str) -> str:
+    """Build NewsAPI's ``qintitle`` query: the company name, OR'd with its ticker.
+
+    The ticker is dropped when it's too short to search on its own (a
+    single letter matches far too much noise) or when name resolution
+    already fell back to the ticker itself, which would just repeat it.
+    """
+    clean_name = (name or "").strip()
+    clean_ticker = (ticker or "").strip().upper()
+    quoted_name = f'"{clean_name}"'
+    if not clean_ticker or len(clean_ticker) <= 1 or clean_ticker == clean_name.upper():
+        return quoted_name
+    return f"{quoted_name} OR {clean_ticker}"
+
+
 def _client() -> Any:
     """Build a ``NewsApiClient``.
 
@@ -106,21 +126,38 @@ def _validate_date_range(from_date: str, to_date: str) -> None:
 
 
 def _format_articles(raw_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Trim a NewsAPI ``articles`` response down to the fields the agents need."""
-    return [
-        {
-            "headline": article.get("title"),
-            "source": (article.get("source") or {}).get("name"),
-            "date": (article.get("publishedAt") or "")[:10],
-            "url": article.get("url"),
-            "summary": article.get("description"),
-        }
-        for article in raw_articles[:_MAX_ARTICLES]
-    ]
+    """Trim a NewsAPI ``articles`` response down to the fields the agents need.
+
+    Skips NewsAPI's "[Removed]" placeholder entries (articles the source
+    later took down) rather than surfacing them as real headlines.
+    """
+    formatted = []
+    for article in raw_articles:
+        title = article.get("title")
+        if not title or title == "[Removed]":
+            continue
+        formatted.append(
+            {
+                "headline": title,
+                "source": (article.get("source") or {}).get("name"),
+                "date": (article.get("publishedAt") or "")[:10],
+                "url": article.get("url"),
+                "summary": article.get("description"),
+            }
+        )
+        if len(formatted) >= _MAX_ARTICLES:
+            break
+    return formatted
 
 
-def _fetch_from_newsapi(query: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
-    """Primary source: NewsAPI.org's ``/v2/everything`` endpoint.
+def _fetch_from_newsapi(
+    name: str, from_date: str, to_date: str, *, ticker: str
+) -> list[dict[str, Any]]:
+    """Primary source: NewsAPI.org's ``/v2/everything`` endpoint, title-only.
+
+    Searches article titles (not full text) for the company name OR'd with
+    its ticker, matching how financial headlines actually read; full-text
+    search on a bare ticker pulls in too much unrelated noise.
 
     Raises:
         ValueError: If the API key is missing, the request fails, NewsAPI
@@ -129,14 +166,16 @@ def _fetch_from_newsapi(query: str, from_date: str, to_date: str) -> list[dict[s
             "no news" when another source might still have some).
     """
     client = _client()
+    query = _title_query(name, ticker)
     try:
         response = client.get_everything(
-            q=query,
+            qintitle=query,
             from_param=from_date,
             to=to_date,
             language="en",
-            sort_by="publishedAt",
+            sort_by="relevancy",
             page_size=_MAX_ARTICLES,
+            exclude_domains=_EXCLUDED_DOMAINS,
         )
     except Exception as exc:
         raise ValueError(f"NewsAPI request failed for '{query}': {exc}") from exc
@@ -212,10 +251,10 @@ def _fetch_from_yfinance(ticker: str, from_date: str, to_date: str) -> list[dict
 
 
 @cached("news_articles", ttl_seconds=ONE_HOUR)
-def _fetch_articles(ticker: str, query: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
+def _fetch_articles(ticker: str, name: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
     """Fetch articles for a ticker/date-window: NewsAPI primary, yfinance fallback.
 
-    Cached by (ticker, query, from_date, to_date): a failure of both live
+    Cached by (ticker, name, from_date, to_date): a failure of both live
     sources is never cached as a success, and if that happens the ``cached``
     decorator itself serves the last cached result for this exact window -
     a third fallback layer - before finally propagating the error.
@@ -226,7 +265,7 @@ def _fetch_articles(ticker: str, query: str, from_date: str, to_date: str) -> li
     """
     errors = []
     try:
-        return _fetch_from_newsapi(query, from_date, to_date)
+        return _fetch_from_newsapi(name, from_date, to_date, ticker=ticker)
     except ValueError as exc:
         errors.append(f"NewsAPI: {exc}")
 

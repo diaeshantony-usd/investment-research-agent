@@ -4,21 +4,26 @@ tools/earnings.py
 Tool for fetching quarterly earnings figures, revenue, and fundamentals.
 
 Composes the live Yahoo Finance tools in ``tools/yahoo_finance.py`` rather
-than keeping its own fixed ticker list: quarterly revenue/gross
-margin/operating and net income come from ``get_financial_statements``,
-forward P/E from ``get_ticker_details``, and free cash flow from the
-ticker's own quarterly cash flow statement. Both reused tools already fall
-back to Alpha Vantage internally when yfinance has nothing for a ticker.
+than keeping its own fixed ticker list: quarterly revenue/margins/income
+and the latest annual free cash flow come from ``get_financial_statements``,
+forward P/E and market cap from ``get_ticker_details``. Both reused tools
+already fall back to Alpha Vantage internally when yfinance has nothing
+for a ticker.
 
-EPS actual/estimate/surprise comes from ``Ticker.get_earnings_dates()``;
-when that's empty and ``ALPHA_VANTAGE_KEY`` is configured, falls back to
-Alpha Vantage's ``EARNINGS`` endpoint (``tools/alpha_vantage.py``) for EPS
-only - Alpha Vantage has no quarterly cash flow equivalent wired up, so
-free cash flow stays ``None`` in that case.
+EPS history comes from ``Ticker.earnings_history``; when that's empty and
+``ALPHA_VANTAGE_KEY`` is configured, ``_get_eps_history`` falls back to
+Alpha Vantage's ``EARNINGS`` endpoint (``tools/alpha_vantage.py``).
+
+Every external call degrades gracefully: a failed/missing source is
+listed by field name in the response's ``unavailable`` list rather than
+raising, except a total failure to find any quarterly statements, which
+is reported as a single ``error`` field with no other figures - there is
+nothing derivable without at least one quarter.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -33,6 +38,10 @@ from research_agent.tools.yahoo_finance import (
     get_ticker_details,
 )
 
+# A quarter is treated as "about one year earlier" within this many days of
+# an exact 365-day gap, to tolerate real-world fiscal-calendar drift.
+_YOY_TOLERANCE_DAYS = 45
+
 
 def _safe_float(value: Any) -> float | None:
     try:
@@ -46,138 +55,264 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _latest_reported_eps(ticker: str) -> dict[str, Any] | None:
-    """Most recent quarter with an actual (not just estimated) EPS, or ``None``."""
+def _format_money(value: float | None) -> str | None:
+    """Scale a raw dollar amount to the nearest T/B/M/K suffix, e.g. ``"$46.00B"``."""
+    if value is None:
+        return None
+    magnitude = abs(value)
+    if magnitude >= 1e12:
+        scaled, suffix = value / 1e12, "T"
+    elif magnitude >= 1e9:
+        scaled, suffix = value / 1e9, "B"
+    elif magnitude >= 1e6:
+        scaled, suffix = value / 1e6, "M"
+    elif magnitude >= 1e3:
+        scaled, suffix = value / 1e3, "K"
+    else:
+        scaled, suffix = value, ""
+    return f"${scaled:.2f}{suffix}"
+
+
+def _growth_pct(current: float | None, previous: float | None) -> float | None:
+    if current is None or previous in (None, 0):
+        return None
+    return round((current - previous) / previous * 100, 2)
+
+
+def _parse_period(period: Any) -> datetime | None:
+    if not period:
+        return None
     try:
-        dates = get_ticker(ticker).get_earnings_dates(limit=12)
-    except Exception as exc:  # noqa: BLE001 - yfinance raises assorted errors; treat as no data
-        logger.info("yfinance: no earnings dates for %s: %s", ticker, exc)
-        return None
-    if dates is None or dates.empty or "Reported EPS" not in dates.columns:
+        return datetime.strptime(str(period)[:10], "%Y-%m-%d")
+    except ValueError:
         return None
 
-    reported = dates.dropna(subset=["Reported EPS"])
-    if reported.empty:
-        return None
 
-    row = reported.iloc[0]
-    eps_actual = _safe_float(row.get("Reported EPS"))
-    eps_estimate = _safe_float(row.get("EPS Estimate"))
-    eps_surprise_pct = (
-        (eps_actual - eps_estimate) / abs(eps_estimate) * 100
-        if eps_actual is not None and eps_estimate not in (None, 0)
-        else None
+def _sorted_quarters(quarters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Quarterly records newest-first, regardless of the order a provider returned them in."""
+    return sorted(
+        quarters, key=lambda q: _parse_period(q.get("period")) or datetime.min, reverse=True
     )
-    return {
-        "quarter": str(reported.index[0].date()),
-        "eps_actual": eps_actual,
-        "eps_estimate": eps_estimate,
-        "eps_surprise_pct": eps_surprise_pct,
-    }
 
 
-def _free_cash_flow(ticker: str) -> float | None:
-    """Latest quarterly operating cash flow minus capital expenditure, or ``None``."""
+def _select_latest_quarter(sorted_quarters: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The newest quarter that actually has figures.
+
+    Some providers list a not-yet-reported quarter before the one with real
+    numbers (seen live for AMZN); skip any quarter with no revenue.
+    """
+    for quarter in sorted_quarters:
+        if quarter.get("Total Revenue") is not None:
+            return quarter
+    return None
+
+
+def _select_prior_quarter(
+    sorted_quarters: list[dict[str, Any]], latest: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The quarter immediately before ``latest``, for quarter-over-quarter growth."""
+    latest_date = _parse_period(latest.get("period"))
+    if latest_date is None:
+        return None
+    for quarter in sorted_quarters:
+        quarter_date = _parse_period(quarter.get("period"))
+        if quarter_date is not None and quarter_date < latest_date:
+            return quarter
+    return None
+
+
+def _select_yoy_quarter(
+    sorted_quarters: list[dict[str, Any]], latest: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The quarter closest to one year before ``latest``, within ``_YOY_TOLERANCE_DAYS``."""
+    latest_date = _parse_period(latest.get("period"))
+    if latest_date is None:
+        return None
+    target = latest_date - timedelta(days=365)
+
+    best, best_diff = None, None
+    for quarter in sorted_quarters:
+        if quarter is latest:
+            continue
+        quarter_date = _parse_period(quarter.get("period"))
+        if quarter_date is None:
+            continue
+        diff = abs((quarter_date - target).days)
+        if diff <= _YOY_TOLERANCE_DAYS and (best_diff is None or diff < best_diff):
+            best, best_diff = quarter, diff
+    return best
+
+
+def _free_cash_flow_annual(statements: dict[str, Any]) -> tuple[float | None, str | None]:
+    """Latest annual free cash flow (and its fiscal year end), or ``(None, None)``.
+
+    Prefers yfinance's own ``"Free Cash Flow"`` line item; falls back to
+    Alpha Vantage's shape (operating cash flow minus capital expenditure)
+    when that line item isn't present.
+    """
+    records = statements.get("annual_cash_flow") or []
+    if not records:
+        return None, None
+
+    latest = max(records, key=lambda r: _parse_period(r.get("period")) or datetime.min)
+    fiscal_year_end = latest.get("period")
+
+    free_cash_flow = latest.get("Free Cash Flow")
+    if free_cash_flow is not None:
+        return free_cash_flow, fiscal_year_end
+
+    operating_cash_flow = latest.get("operatingCashflow")
+    capital_expenditure = latest.get("capitalExpenditures")
+    if operating_cash_flow is not None and capital_expenditure is not None:
+        return operating_cash_flow - abs(capital_expenditure), fiscal_year_end
+    return None, fiscal_year_end
+
+
+def _eps_history_yfinance(ticker: str) -> list[dict[str, Any]]:
+    """Quarterly EPS actual/estimate/surprise, newest first, via ``Ticker.earnings_history``.
+
+    Raises:
+        ValueError: If yfinance has no earnings history for this ticker.
+    """
+    frame = getattr(get_ticker(ticker), "earnings_history", None)
+    if frame is None or frame.empty:
+        raise ValueError(f"No EPS history found for '{ticker}'")
+
+    history = []
+    for period, row in frame.sort_index(ascending=False).iterrows():
+        surprise = _safe_float(row.get("surprisePercent"))
+        history.append(
+            {
+                "period": str(period.date()) if hasattr(period, "date") else str(period),
+                "eps_actual": _safe_float(row.get("epsActual")),
+                "eps_estimate": _safe_float(row.get("epsEstimate")),
+                "surprise_pct": round(surprise * 100, 2) if surprise is not None else None,
+            }
+        )
+    return history
+
+
+@cached("get_eps_history", ttl_seconds=ONE_DAY)
+def _get_eps_history(ticker: str) -> list[dict[str, Any]]:
+    """EPS history via yfinance, falling back to Alpha Vantage if that's empty.
+
+    Raises:
+        ValueError: If neither provider has EPS history for this ticker.
+    """
     try:
-        cashflow = get_ticker(ticker).quarterly_cashflow
-    except Exception as exc:  # noqa: BLE001 - yfinance raises assorted errors; treat as no data
-        logger.info("yfinance: no quarterly cash flow for %s: %s", ticker, exc)
-        return None
-    if cashflow is None or cashflow.empty:
-        return None
-
-    column = cashflow.iloc[:, 0]
-    ocf = _safe_float(
-        column.get("Operating Cash Flow")
-        if "Operating Cash Flow" in column.index
-        else column.get("Total Cash From Operating Activities")
-    )
-    capex = _safe_float(column.get("Capital Expenditure"))
-    if ocf is None or capex is None:
-        return None
-    return ocf - abs(capex)
+        return _eps_history_yfinance(ticker)
+    except Exception as exc:
+        logger.info("yfinance EPS history failed for %s: %s", ticker, exc)
+        if not alpha_vantage.is_configured():
+            raise
+        return alpha_vantage.get_earnings_history(ticker)
 
 
 @tool(
     name="get_earnings_data",
     description=(
-        "Retrieves the most recently reported quarter's revenue, gross margin, operating "
-        "and net income, free cash flow, forward P/E, and EPS actual/estimate/surprise for "
-        "a stock ticker, live from Yahoo Finance (falling back to Alpha Vantage for EPS if "
-        "needed)."
+        "Retrieves the most recently reported quarter's revenue, margins, YoY/QoQ revenue "
+        "growth, annual free cash flow, forward P/E, market cap and EPS history for a stock "
+        "ticker, live from Yahoo Finance (falling back to Alpha Vantage where needed)."
     ),
 )
-@cached("get_earnings_data", ttl_seconds=ONE_DAY)
 def get_earnings_data(ticker: str) -> dict[str, Any]:
-    """Returns the latest quarterly earnings figures for a given ticker symbol.
+    """Returns the latest quarterly earnings figures and trends for a given ticker symbol.
 
     Args:
         ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
 
     Returns:
-        Latest quarter's revenue, gross margin %, operating/net income, free
-        cash flow, forward P/E, and EPS actual/estimate/surprise %, plus a
-        ``source`` field naming which provider answered the EPS figures.
-
-    Raises:
-        ValueError: If no revenue or EPS data can be found for this ticker
-            from either provider.
+        Latest quarter's revenue, margins, YoY/QoQ revenue growth, annual
+        free cash flow, forward P/E, market cap, EPS actual/surprise and
+        history, plus an ``unavailable`` list naming any field that
+        couldn't be determined. A ticker with no quarterly statements at
+        all returns only ``ticker`` and ``error``.
     """
     clean = (ticker or "").strip().upper()
     if not clean:
-        raise ValueError("ticker must not be empty")
+        return {"ticker": clean, "error": "ticker must not be empty"}
     logger.info("Executing get_earnings_data for ticker: %s", clean)
 
-    quarter = revenue = gross_margin_pct = operating_income = net_income = None
     try:
         statements = get_financial_statements.func(clean)
-        quarterly = statements.get("quarterly_income_statement") or []
-        if quarterly:
-            latest = quarterly[0]
-            quarter = latest.get("period")
-            revenue = latest.get("Total Revenue")
-            gross_profit = latest.get("Gross Profit")
-            operating_income = latest.get("Operating Income")
-            net_income = latest.get("Net Income")
-            if revenue and gross_profit is not None:
-                gross_margin_pct = round(gross_profit / revenue * 100, 2)
-    except ValueError as exc:
-        logger.info("No quarterly income statement for %s: %s", clean, exc)
+    except Exception as exc:  # noqa: BLE001 - any statements-provider failure is a clean miss
+        logger.warning("No financial statements for %s: %s", clean, exc)
+        return {"ticker": clean, "error": f"No earnings data available for '{clean}': {exc}"}
 
-    forward_pe = None
+    quarters = _sorted_quarters(statements.get("quarterly_income_statement") or [])
+    latest = _select_latest_quarter(quarters)
+    if latest is None:
+        return {"ticker": clean, "error": f"No quarterly figures available for '{clean}'"}
+
+    revenue = latest.get("Total Revenue")
+    gross_profit = latest.get("Gross Profit")
+    operating_income = latest.get("Operating Income")
+    net_income = latest.get("Net Income")
+
+    unavailable: list[str] = []
+
+    prior_qoq = _select_prior_quarter(quarters, latest)
+    prior_yoy = _select_yoy_quarter(quarters, latest)
+    qoq_revenue = prior_qoq.get("Total Revenue") if prior_qoq else None
+    yoy_revenue = prior_yoy.get("Total Revenue") if prior_yoy else None
+    revenue_growth_qoq_pct = _growth_pct(revenue, qoq_revenue)
+    revenue_growth_yoy_pct = _growth_pct(revenue, yoy_revenue)
+    if revenue_growth_yoy_pct is None:
+        unavailable.append("revenue_growth_yoy_pct")
+
+    free_cash_flow, fiscal_year_end = _free_cash_flow_annual(statements)
+
+    forward_pe = market_cap = None
     try:
-        forward_pe = get_ticker_details.func(clean).get("forward_pe")
-    except ValueError as exc:
+        details = get_ticker_details.func(clean)
+    except Exception as exc:  # noqa: BLE001 - ticker-details failure degrades gracefully
         logger.info("No ticker details for %s: %s", clean, exc)
+        unavailable.append("forward_pe")
+    else:
+        forward_pe = details.get("forward_pe")
+        market_cap = details.get("market_cap")
 
-    free_cash_flow = _free_cash_flow(clean)
-
-    eps = _latest_reported_eps(clean)
-    source = "yfinance"
-    if eps is None and alpha_vantage.is_configured():
-        try:
-            eps = alpha_vantage.get_earnings(clean)
-        except ValueError as exc:
-            logger.warning("Alpha Vantage EPS fallback failed for %s: %s", clean, exc)
+    eps_actual = eps_quarter = eps_surprise_pct = None
+    eps_history: list[dict[str, Any]] = []
+    try:
+        eps_history = _get_eps_history(clean)
+    except Exception as exc:  # noqa: BLE001 - EPS-history failure degrades gracefully
+        logger.info("No EPS history for %s: %s", clean, exc)
+        unavailable.extend(["eps_surprise_pct", "eps_history"])
+    else:
+        if eps_history:
+            latest_eps = eps_history[0]
+            eps_actual = latest_eps.get("eps_actual")
+            eps_quarter = latest_eps.get("period")
+            eps_surprise_pct = latest_eps.get("surprise_pct")
         else:
-            source = "alpha_vantage"
+            unavailable.extend(["eps_surprise_pct", "eps_history"])
 
-    if revenue is None and eps is None:
-        raise ValueError(f"No earnings data available for '{clean}'")
-
-    eps = eps or {}
-    eps_surprise_pct = eps.get("eps_surprise_pct")
     return {
         "ticker": clean,
-        "quarter": quarter or eps.get("quarter"),
-        "revenue": revenue,
-        "gross_margin_pct": gross_margin_pct,
-        "operating_income": operating_income,
-        "net_income": net_income,
-        "free_cash_flow": free_cash_flow,
+        "quarter_end": latest.get("period"),
+        "revenue": _format_money(revenue),
+        "gross_margin_pct": (
+            round(gross_profit / revenue * 100, 2) if revenue and gross_profit is not None else None
+        ),
+        "operating_margin_pct": (
+            round(operating_income / revenue * 100, 2)
+            if revenue and operating_income is not None
+            else None
+        ),
+        "net_margin_pct": (
+            round(net_income / revenue * 100, 2) if revenue and net_income is not None else None
+        ),
+        "revenue_growth_yoy_pct": revenue_growth_yoy_pct,
+        "revenue_growth_qoq_pct": revenue_growth_qoq_pct,
+        "free_cash_flow_annual": _format_money(free_cash_flow),
+        "fiscal_year_end": fiscal_year_end,
         "forward_pe": forward_pe,
-        "eps_actual": eps.get("eps_actual"),
-        "eps_estimate": eps.get("eps_estimate"),
-        "eps_surprise_pct": round(eps_surprise_pct, 2) if eps_surprise_pct is not None else None,
-        "source": source,
+        "market_cap": _format_money(market_cap),
+        "eps_actual": eps_actual,
+        "eps_quarter": eps_quarter,
+        "eps_surprise_pct": eps_surprise_pct,
+        "eps_history": eps_history,
+        "unavailable": unavailable,
     }

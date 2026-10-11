@@ -132,32 +132,35 @@ def _reports_to_records(payload: dict[str, Any], key: str) -> list[dict[str, Any
     return records
 
 
-def get_earnings(ticker: str) -> dict[str, Any]:
-    """Most recent quarter's EPS actual/estimate/surprise via the ``EARNINGS`` endpoint.
+def get_earnings_history(ticker: str) -> list[dict[str, Any]]:
+    """Quarterly EPS actual/estimate/surprise history via the ``EARNINGS`` endpoint.
 
     Args:
         ticker: Stock symbol, already cleaned/upper-cased by the caller.
 
     Returns:
-        ``quarter``, ``eps_actual``, ``eps_estimate``, ``eps_surprise_pct``.
+        Newest-first list of ``{period, eps_actual, eps_estimate, surprise_pct}``,
+        matching the shape of ``earnings._eps_history_yfinance``.
 
     Raises:
         ValueError: If Alpha Vantage has no earnings for this ticker.
     """
-    logger.info("Alpha Vantage: fetching earnings for %s", ticker)
+    logger.info("Alpha Vantage: fetching earnings history for %s", ticker)
 
     payload = _get({"function": "EARNINGS", "symbol": ticker})
     quarterly = payload.get("quarterlyEarnings") or []
     if not quarterly:
         raise ValueError(f"Alpha Vantage has no earnings for '{ticker}'")
 
-    latest = quarterly[0]
-    return {
-        "quarter": latest.get("fiscalDateEnding"),
-        "eps_actual": _safe_float(latest.get("reportedEPS")),
-        "eps_estimate": _safe_float(latest.get("estimatedEPS")),
-        "eps_surprise_pct": _safe_float(latest.get("surprisePercentage")),
-    }
+    return [
+        {
+            "period": item.get("fiscalDateEnding"),
+            "eps_actual": _safe_float(item.get("reportedEPS")),
+            "eps_estimate": _safe_float(item.get("estimatedEPS")),
+            "surprise_pct": _safe_float(item.get("surprisePercentage")),
+        }
+        for item in quarterly
+    ]
 
 
 def get_financial_statements(ticker: str) -> dict[str, Any]:

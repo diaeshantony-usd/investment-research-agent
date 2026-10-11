@@ -26,7 +26,12 @@ dependencies = [
 dev = [
     "mypy>=1.10.0",
     "pytest>=8.0.0",
+    "pytest-cov>=7.0.0",
     "ruff>=0.6.0",
+    "gradio>=6.0.0",
+]
+ui = [
+    "gradio>=6.0.0",
 ]
 
 [project.scripts]
@@ -83,7 +88,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --strict-markers"
+addopts = "-v --strict-markers --cov=research_agent --cov-report=term-missing --cov-fail-under=90"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::RuntimeWarning",
