@@ -50,7 +50,7 @@ def _latest_reported_eps(ticker: str) -> dict[str, Any] | None:
     """Most recent quarter with an actual (not just estimated) EPS, or ``None``."""
     try:
         dates = get_ticker(ticker).get_earnings_dates(limit=12)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - yfinance raises assorted errors; treat as no data
         logger.info("yfinance: no earnings dates for %s: %s", ticker, exc)
         return None
     if dates is None or dates.empty or "Reported EPS" not in dates.columns:
@@ -80,7 +80,7 @@ def _free_cash_flow(ticker: str) -> float | None:
     """Latest quarterly operating cash flow minus capital expenditure, or ``None``."""
     try:
         cashflow = get_ticker(ticker).quarterly_cashflow
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - yfinance raises assorted errors; treat as no data
         logger.info("yfinance: no quarterly cash flow for %s: %s", ticker, exc)
         return None
     if cashflow is None or cashflow.empty:

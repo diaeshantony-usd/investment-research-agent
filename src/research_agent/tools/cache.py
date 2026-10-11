@@ -106,9 +106,7 @@ def cached(prefix: str, ttl_seconds: float = DEFAULT_TTL_SECONDS) -> Callable:
                 result = func(*args, **kwargs)
             except Exception as exc:
                 if entry is not None:
-                    logger.warning(
-                        "Live call failed for %s (%s); serving stale cache", prefix, exc
-                    )
+                    logger.warning("Live call failed for %s (%s); serving stale cache", prefix, exc)
                     return entry["value"]
                 raise
 

@@ -163,9 +163,7 @@ def get_historical_data(
     """
     clean = (ticker or "").strip().upper()
     t = get_ticker(clean)
-    logger.info(
-        "yfinance: fetching history for %s period=%s interval=%s", clean, period, interval
-    )
+    logger.info("yfinance: fetching history for %s period=%s interval=%s", clean, period, interval)
 
     history = t.history(period=period, interval=interval)
     if history.empty:

@@ -57,9 +57,7 @@ def _run_interactive_loop(session: ResearchSession, thread_id: str) -> None:
             if user_input.lower() in {"memory", "/memory"}:
                 import json
 
-                sys.stdout.write(
-                    f"\n{json.dumps(session.root_memory, indent=2, default=str)}\n\n"
-                )
+                sys.stdout.write(f"\n{json.dumps(session.root_memory, indent=2, default=str)}\n\n")
                 continue
             session.ask(user_input, show=False)
             sys.stdout.write(f"\n{session.last_answer}\n\n")
@@ -102,9 +100,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    is_interactive = bool(
-        args.interactive or (args.query and args.query.lower() == "interactive")
-    )
+    is_interactive = bool(args.interactive or (args.query and args.query.lower() == "interactive"))
 
     if args.thread_id:
         thread_id = args.thread_id
@@ -128,4 +124,3 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 0
-

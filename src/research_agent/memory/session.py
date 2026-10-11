@@ -544,10 +544,7 @@ class ResearchSession:
 
         brief_text = str(cached["value"].get("brief", ""))
         # If cache contains an unavailable data notice, purge it and return empty
-        if (
-            "COVERAGE UNAVAILABLE" in brief_text.upper()
-            or "DATA UNAVAILABLE" in brief_text.upper()
-        ):
+        if "COVERAGE UNAVAILABLE" in brief_text.upper() or "DATA UNAVAILABLE" in brief_text.upper():
             self.store.cache_delete(self.thread_id, f"brief:{ticker}")
             return {}
 

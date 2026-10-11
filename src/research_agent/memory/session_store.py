@@ -511,4 +511,3 @@ class SessionStore:
             "DELETE FROM context_cache WHERE thread_id = ? AND key = ?",
             (thread_id, key),
         )
-
