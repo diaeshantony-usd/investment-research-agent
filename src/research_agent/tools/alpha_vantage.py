@@ -159,3 +159,33 @@ def get_financial_statements(ticker: str) -> dict[str, Any]:
     if not any(statements[k] for k in statements if k != "ticker"):
         raise ValueError(f"Alpha Vantage has no financial statements for '{ticker}'")
     return statements
+
+
+def get_earnings_history(ticker: str) -> list[dict[str, Any]]:
+    """Recent quarterly EPS (reported vs. estimate) via Alpha Vantage's EARNINGS endpoint.
+
+    Args:
+        ticker: Stock symbol, already cleaned/upper-cased by the caller.
+
+    Returns:
+        Quarters, most recent first, each with ``period``, ``reported_date``,
+        ``eps_actual``, ``eps_estimate`` and ``surprise_pct``.
+
+    Raises:
+        ValueError: If Alpha Vantage returns no quarterly earnings.
+    """
+    logger.info("Alpha Vantage: fetching earnings history for %s", ticker)
+    payload = _get({"function": "EARNINGS", "symbol": ticker})
+    quarters = [
+        {
+            "period": row.get("fiscalDateEnding"),
+            "reported_date": row.get("reportedDate"),
+            "eps_actual": _safe_float(row.get("reportedEPS")),
+            "eps_estimate": _safe_float(row.get("estimatedEPS")),
+            "surprise_pct": _safe_float(row.get("surprisePercentage")),
+        }
+        for row in payload.get("quarterlyEarnings") or []
+    ]
+    if not quarters:
+        raise ValueError(f"Alpha Vantage has no earnings history for '{ticker}'")
+    return quarters
