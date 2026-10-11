@@ -56,6 +56,19 @@ class MockFrameworkLLM(LLM):
         return [t.func for t in tools.values()]
 
 
+def _stub_no_news(monkeypatch) -> None:
+    """Make get_news_data return no articles, so workflow tests run offline."""
+    import json
+
+    from research_agent.tools.news import get_news_data
+
+    monkeypatch.setattr(
+        get_news_data,
+        "func",
+        lambda ticker, days=7: json.dumps({"ticker": ticker, "articles": [], "message": "none"}),
+    )
+
+
 class TestAgentFramework:
     """Verifies core classes and orchestration mechanics in agent_framework.py."""
 
@@ -260,9 +273,11 @@ class TestAgentFramework:
         assert "Data Unavailable" in DRAFT_WRITER_ROLE
         assert "MUST NOT issue an investment stance" in DRAFT_WRITER_ROLE
 
-    def test_workflow_data_unavailable_passes_critic(self):
+    def test_workflow_data_unavailable_passes_critic(self, monkeypatch):
         from research_agent.agent_framework import GraphMemory
         from research_agent.workflows.graph import build_research_workflow
+
+        _stub_no_news(monkeypatch)
 
         # Workflow where DraftWriter outputs Coverage Unavailable and Critic passes it
         llm = MockFrameworkLLM(
@@ -270,7 +285,7 @@ class TestAgentFramework:
                 ("RESEARCH_REQUIRED: TSLA - evaluate", []),  # Planner
                 ("No earnings data for TSLA", []),  # EarningsAnalyst
                 ("No market technicals for TSLA", []),  # MarketAnalyst
-                ("No news for TSLA", []),  # NewsAnalyst
+                # NewsAnalyst: the prompt chain finds no articles, so it makes no LLM call.
                 ("# Research Brief: TSLA - Coverage Unavailable", []),  # DraftWriter
                 ("SCORE: 10/10. STATUS: PASS - Data unavailable confirmed.", []),  # Critic
             ]
@@ -287,9 +302,11 @@ class TestAgentFramework:
         assert "refiner" not in executed_nodes
         assert "Coverage Unavailable" in state.output
 
-    def test_workflow_uncovered_ticker_with_tools_passes_critic(self):
+    def test_workflow_uncovered_ticker_with_tools_passes_critic(self, monkeypatch):
         from research_agent.agent_framework import GraphMemory
         from research_agent.workflows.graph import build_research_workflow
+
+        _stub_no_news(monkeypatch)
 
         # Specialists invoke real tools for TSLA which return no data / errors
         llm = MockFrameworkLLM(
@@ -305,8 +322,8 @@ class TestAgentFramework:
                     [{"name": "get_market_technicals", "args": {"ticker": "TSLA"}}],
                 ),
                 ("No technicals found for TSLA.", []),
-                ("Checking news...", [{"name": "get_news_data", "args": {"ticker": "TSLA"}}]),
-                ("No news found for TSLA.", []),
+                # NewsAnalyst: the prompt chain calls get_news_data itself and, with no
+                # articles, makes no LLM call.
                 ("# Research Brief: TSLA - Data Unavailable", []),  # DraftWriter
                 ("SCORE: 10/10. STATUS: PASS - Verified no data.", []),  # Critic
             ]
@@ -322,5 +339,3 @@ class TestAgentFramework:
         assert "critic" in executed_nodes
         assert "refiner" not in executed_nodes
         assert "Data Unavailable" in state.output
-
-
