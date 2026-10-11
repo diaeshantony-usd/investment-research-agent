@@ -9,8 +9,7 @@ News tools for live headlines about a stock ticker, time-windowed:
 Three layers of fallback, in order, matching the design doc's data-sources
 table:
 
-1. NewsAPI.org's ``/v2/everything`` (primary; headline search for the company name or
-   ticker, excluding package and code-hosting sites)
+1. NewsAPI.org's ``/v2/everything`` (primary; full-text search by company name)
 2. yfinance's ``Ticker.news`` (used when NewsAPI has no key, fails, or
    returns zero results; filtered down to the requested date window)
 3. The last cached response for that exact query/window (used when both
@@ -37,11 +36,6 @@ from research_agent.tools.cache import ONE_HOUR, cached
 from research_agent.tools.yahoo_finance import get_ticker_details
 
 _MAX_ARTICLES = 10
-
-# Sites that mention company names in package/release listings rather than news.
-_EXCLUDED_DOMAINS = ("pypi.org", "github.com", "npmjs.com", "pkg.go.dev", "rubygems.org")
-# Tickers this short ("F", "GE") match unrelated words, so they are not searched alone.
-_MIN_TICKER_QUERY_LEN = 3
 
 # Strips a trailing legal suffix ("NVIDIA Corporation" -> "NVIDIA", "Apple
 # Inc." -> "Apple") so the NewsAPI query reads like prose, not a filing name.
@@ -112,11 +106,7 @@ def _validate_date_range(from_date: str, to_date: str) -> None:
 
 
 def _format_articles(raw_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Trim a NewsAPI ``articles`` response down to the fields the agents need.
-
-    NewsAPI replaces withdrawn articles with the placeholder title ``[Removed]``;
-    those are skipped.
-    """
+    """Trim a NewsAPI ``articles`` response down to the fields the agents need."""
     return [
         {
             "headline": article.get("title"),
@@ -125,31 +115,12 @@ def _format_articles(raw_articles: list[dict[str, Any]]) -> list[dict[str, Any]]
             "url": article.get("url"),
             "summary": article.get("description"),
         }
-        for article in raw_articles
-        if article.get("title") and article.get("title") != "[Removed]"
-    ][:_MAX_ARTICLES]
+        for article in raw_articles[:_MAX_ARTICLES]
+    ]
 
 
-def _title_query(name: str, ticker: str) -> str:
-    """Build a headline query: the exact company name, or the ticker when it is distinctive.
-
-    ``'"NVIDIA" OR NVDA'`` only matches articles whose title names the company, which
-    filters out pages that merely mention it in passing.
-    """
-    terms = [f'"{name}"']
-    if ticker and ticker != name.upper() and len(ticker) >= _MIN_TICKER_QUERY_LEN:
-        terms.append(ticker)
-    return " OR ".join(terms)
-
-
-def _fetch_from_newsapi(
-    query: str, from_date: str, to_date: str, ticker: str = ""
-) -> list[dict[str, Any]]:
+def _fetch_from_newsapi(query: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
     """Primary source: NewsAPI.org's ``/v2/everything`` endpoint.
-
-    Only headlines are searched (``qintitle``) for the company name or ticker, known
-    package/code-hosting sites are excluded, and results are sorted by relevance so
-    the article cap keeps the best matches in the window.
 
     Raises:
         ValueError: If the API key is missing, the request fails, NewsAPI
@@ -160,14 +131,12 @@ def _fetch_from_newsapi(
     client = _client()
     try:
         response = client.get_everything(
-            qintitle=_title_query(query, ticker),
-            exclude_domains=",".join(_EXCLUDED_DOMAINS),
+            q=query,
             from_param=from_date,
             to=to_date,
             language="en",
-            sort_by="relevancy",
-            # Over-fetch slightly so skipped "[Removed]" items don't shrink the result.
-            page_size=_MAX_ARTICLES * 2,
+            sort_by="publishedAt",
+            page_size=_MAX_ARTICLES,
         )
     except Exception as exc:
         raise ValueError(f"NewsAPI request failed for '{query}': {exc}") from exc
@@ -242,8 +211,7 @@ def _fetch_from_yfinance(ticker: str, from_date: str, to_date: str) -> list[dict
     return articles
 
 
-# "v2": headline-only search; the new prefix keeps older, broader cached results unused.
-@cached("news_articles_v2", ttl_seconds=ONE_HOUR)
+@cached("news_articles", ttl_seconds=ONE_HOUR)
 def _fetch_articles(ticker: str, query: str, from_date: str, to_date: str) -> list[dict[str, Any]]:
     """Fetch articles for a ticker/date-window: NewsAPI primary, yfinance fallback.
 
@@ -258,7 +226,7 @@ def _fetch_articles(ticker: str, query: str, from_date: str, to_date: str) -> li
     """
     errors = []
     try:
-        return _fetch_from_newsapi(query, from_date, to_date, ticker=ticker)
+        return _fetch_from_newsapi(query, from_date, to_date)
     except ValueError as exc:
         errors.append(f"NewsAPI: {exc}")
 
@@ -290,6 +258,13 @@ def get_news_data(ticker: str, days: int = 7) -> str:
         ``error`` field when the key is missing or the request failed, or a
         ``message`` field when the request succeeded with zero articles.
     """
+    # Tool-calling LLMs sometimes send a declared-int argument as a JSON
+    # string (e.g. "7" instead of 7); coerce defensively rather than crash.
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 7
+
     clean_ticker = (ticker or "").strip().upper()
     query = _search_term(clean_ticker)
     today = datetime.now(timezone.utc).date()

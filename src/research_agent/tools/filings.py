@@ -306,6 +306,13 @@ def search_sec_filings(ticker: str, query: str, form_type: str = "10-K", top_k: 
         ``{text, score}`` ranked most-relevant first; an ``error`` field if
         the ticker/filing/document couldn't be resolved at all.
     """
+    # Tool-calling LLMs sometimes send a declared-int argument as a JSON
+    # string (e.g. "5" instead of 5); coerce defensively rather than crash.
+    try:
+        top_k = int(top_k)
+    except (TypeError, ValueError):
+        top_k = 5
+
     clean_ticker = (ticker or "").strip().upper()
     requested_form = form_type.strip().upper() if form_type else ""
     clean_form = requested_form if requested_form in _VALID_FORM_TYPES else "10-K"

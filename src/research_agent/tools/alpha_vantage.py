@@ -6,7 +6,8 @@ for a ticker (rate-limited, delisted, or otherwise unavailable).
 
 Not exposed as agent-facing ``@tool`` functions on its own -
 ``get_ticker_details`` and ``get_financial_statements`` in
-``tools/yahoo_finance.py`` call into this module only after their primary
+``tools/yahoo_finance.py``, plus ``get_earnings_data`` in
+``tools/earnings.py``, call into this module only after their primary
 yfinance call fails, and only when ``ALPHA_VANTAGE_KEY`` is configured.
 
 Free-tier quirks handled here:
@@ -131,6 +132,34 @@ def _reports_to_records(payload: dict[str, Any], key: str) -> list[dict[str, Any
     return records
 
 
+def get_earnings(ticker: str) -> dict[str, Any]:
+    """Most recent quarter's EPS actual/estimate/surprise via the ``EARNINGS`` endpoint.
+
+    Args:
+        ticker: Stock symbol, already cleaned/upper-cased by the caller.
+
+    Returns:
+        ``quarter``, ``eps_actual``, ``eps_estimate``, ``eps_surprise_pct``.
+
+    Raises:
+        ValueError: If Alpha Vantage has no earnings for this ticker.
+    """
+    logger.info("Alpha Vantage: fetching earnings for %s", ticker)
+
+    payload = _get({"function": "EARNINGS", "symbol": ticker})
+    quarterly = payload.get("quarterlyEarnings") or []
+    if not quarterly:
+        raise ValueError(f"Alpha Vantage has no earnings for '{ticker}'")
+
+    latest = quarterly[0]
+    return {
+        "quarter": latest.get("fiscalDateEnding"),
+        "eps_actual": _safe_float(latest.get("reportedEPS")),
+        "eps_estimate": _safe_float(latest.get("estimatedEPS")),
+        "eps_surprise_pct": _safe_float(latest.get("surprisePercentage")),
+    }
+
+
 def get_financial_statements(ticker: str) -> dict[str, Any]:
     """Income statement, balance sheet and cash flow via Alpha Vantage.
 
@@ -159,33 +188,3 @@ def get_financial_statements(ticker: str) -> dict[str, Any]:
     if not any(statements[k] for k in statements if k != "ticker"):
         raise ValueError(f"Alpha Vantage has no financial statements for '{ticker}'")
     return statements
-
-
-def get_earnings_history(ticker: str) -> list[dict[str, Any]]:
-    """Recent quarterly EPS (reported vs. estimate) via Alpha Vantage's EARNINGS endpoint.
-
-    Args:
-        ticker: Stock symbol, already cleaned/upper-cased by the caller.
-
-    Returns:
-        Quarters, most recent first, each with ``period``, ``reported_date``,
-        ``eps_actual``, ``eps_estimate`` and ``surprise_pct``.
-
-    Raises:
-        ValueError: If Alpha Vantage returns no quarterly earnings.
-    """
-    logger.info("Alpha Vantage: fetching earnings history for %s", ticker)
-    payload = _get({"function": "EARNINGS", "symbol": ticker})
-    quarters = [
-        {
-            "period": row.get("fiscalDateEnding"),
-            "reported_date": row.get("reportedDate"),
-            "eps_actual": _safe_float(row.get("reportedEPS")),
-            "eps_estimate": _safe_float(row.get("estimatedEPS")),
-            "surprise_pct": _safe_float(row.get("surprisePercentage")),
-        }
-        for row in payload.get("quarterlyEarnings") or []
-    ]
-    if not quarters:
-        raise ValueError(f"Alpha Vantage has no earnings history for '{ticker}'")
-    return quarters
