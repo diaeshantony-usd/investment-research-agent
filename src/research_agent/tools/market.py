@@ -1,7 +1,16 @@
 """
 tools/market.py
 ===============
-Tool for retrieving market technicals, price action, moving averages, and indicators.
+Tool for retrieving market technicals, price action, moving averages, and
+indicators - computed from real Yahoo Finance data (``tools/yahoo_finance.py``)
+rather than a fixed ticker list.
+
+``get_market_technicals`` combines a year of daily closes
+(``get_historical_data``) with the live quote/ratios (``get_ticker_details``)
+to compute 50/200-day SMAs, 14-day RSI (Wilder's smoothing) and a simple
+trend label, alongside beta and the 52-week range. Both underlying calls are
+already cached and have their own Alpha Vantage fallback (see
+``yahoo_finance.py``), so this tool inherits that resilience for free.
 """
 
 from __future__ import annotations
@@ -11,46 +20,64 @@ from typing import Any
 
 from research_agent.agent_framework import tool
 from research_agent.config import logger
-from research_agent.tools.yahoo_finance import get_ticker_details
+from research_agent.tools.yahoo_finance import get_historical_data, get_ticker_details
 
-_MARKET_DATABASE: dict[str, dict[str, Any]] = {
-    "NVDA": {
-        "current_price": "$138.50",
-        "52_week_high": "$140.76",
-        "52_week_low": "$45.11",
-        "50_day_sma": "$126.80",
-        "200_day_sma": "$102.40",
-        "rsi_14": "61.4",
-        "beta": "1.68",
-        "trend": "Bullish Uptrend",
-    },
-    "AAPL": {
-        "current_price": "$224.20",
-        "52_week_high": "$237.23",
-        "52_week_low": "$164.08",
-        "50_day_sma": "$218.40",
-        "200_day_sma": "$195.10",
-        "rsi_14": "54.8",
-        "beta": "1.02",
-        "trend": "Moderate Uptrend",
-    },
-    "MSFT": {
-        "current_price": "$428.90",
-        "52_week_high": "$468.35",
-        "52_week_low": "$327.00",
-        "50_day_sma": "$435.10",
-        "200_day_sma": "$412.50",
-        "rsi_14": "48.2",
-        "beta": "1.15",
-        "trend": "Consolidation",
-    },
-}
+_SMA_WINDOWS = (50, 200)
+_RSI_PERIOD = 14
+# A year of daily candles comfortably covers a 200-day SMA even accounting
+# for market holidays (~252 trading days/year).
+_HISTORY_PERIOD = "1y"
+
+
+def _sma(closes: list[float], window: int) -> float | None:
+    """Simple moving average of the last ``window`` closes, or ``None`` if too few."""
+    if len(closes) < window:
+        return None
+    return sum(closes[-window:]) / window
+
+
+def _rsi(closes: list[float], period: int = _RSI_PERIOD) -> float | None:
+    """14-day RSI using Wilder's smoothing, or ``None`` if there isn't enough history."""
+    if len(closes) < period + 1:
+        return None
+
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0.0 for d in deltas]
+    losses = [-d if d < 0 else 0.0 for d in deltas]
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100.0
+    relative_strength = avg_gain / avg_loss
+    return 100 - (100 / (1 + relative_strength))
+
+
+def _trend_label(current_price: float | None, sma50: float | None, sma200: float | None) -> str:
+    """A plain-language trend label from price vs. its moving averages."""
+    if current_price is None or sma50 is None or sma200 is None:
+        return "Insufficient data"
+    if current_price > sma50 > sma200:
+        return "Bullish Uptrend"
+    if current_price < sma50 < sma200:
+        return "Bearish Downtrend"
+    if sma50 > sma200:
+        return "Moderate Uptrend"
+    if sma50 < sma200:
+        return "Moderate Downtrend"
+    return "Consolidation"
 
 
 @tool(
     name="get_market_technicals",
     description=(
-        "Retrieves technical price action, moving averages (SMA 50/200), RSI, and trend metrics."
+        "Retrieves technical price action for a stock ticker: 50/200-day simple moving "
+        "averages, 14-day RSI, beta, 52-week range and a trend label, computed from live "
+        "Yahoo Finance price history."
     ),
 )
 def get_market_technicals(ticker: str) -> str:
@@ -60,24 +87,42 @@ def get_market_technicals(ticker: str) -> str:
         ticker: Stock symbol (e.g. 'NVDA', 'AAPL').
 
     Returns:
-        JSON with price, 52-week range, moving averages, RSI, beta and trend, or
-        an ``error`` field when the ticker is not covered.
+        JSON with current price, 52-week range, 50/200-day SMAs, 14-day RSI,
+        beta and a trend label, or an ``error`` field when the ticker's
+        price history or quote can't be retrieved. SMA/RSI fields are
+        ``null`` when there isn't enough price history to compute them
+        (e.g. a recent IPO).
     """
     clean_ticker = (ticker or "").strip().upper()
     logger.info("Executing get_market_technicals for ticker: %s", clean_ticker)
 
-    data = _MARKET_DATABASE.get(clean_ticker)
-    if data:
-        payload = {"ticker": clean_ticker, **data}
-        return json.dumps(payload, indent=2)
+    try:
+        details = get_ticker_details.func(clean_ticker)
+        history = get_historical_data.func(clean_ticker, period=_HISTORY_PERIOD, interval="1d")
+    except ValueError as exc:
+        logger.warning("get_market_technicals failed for %s: %s", clean_ticker, exc)
+        return json.dumps({"ticker": clean_ticker, "error": str(exc)})
 
-    logger.warning("No market technicals found for ticker: %s", clean_ticker)
-    return json.dumps(
-        {
-            "ticker": clean_ticker,
-            "error": f"No technical data available for '{clean_ticker}'",
-        }
-    )
+    closes = [candle["close"] for candle in history]
+    sma50 = _sma(closes, 50)
+    sma200 = _sma(closes, 200)
+    rsi14 = _rsi(closes)
+    current_price = details.get("current_price")
+
+    payload: dict[str, Any] = {
+        "ticker": clean_ticker,
+        "current_price": current_price,
+        "52_week_high": details.get("fifty_two_week_high"),
+        "52_week_low": details.get("fifty_two_week_low"),
+        "50_day_sma": round(sma50, 2) if sma50 is not None else None,
+        "200_day_sma": round(sma200, 2) if sma200 is not None else None,
+        "rsi_14": round(rsi14, 2) if rsi14 is not None else None,
+        "beta": details.get("beta"),
+        "trend": _trend_label(current_price, sma50, sma200),
+        "source": details.get("source", "yfinance"),
+    }
+    return json.dumps(payload, indent=2)
+
 
 @tool(
     name="get_stock_price",
