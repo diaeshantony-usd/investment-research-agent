@@ -258,6 +258,13 @@ def get_news_data(ticker: str, days: int = 7) -> str:
         ``error`` field when the key is missing or the request failed, or a
         ``message`` field when the request succeeded with zero articles.
     """
+    # Tool-calling LLMs sometimes send a declared-int argument as a JSON
+    # string (e.g. "7" instead of 7); coerce defensively rather than crash.
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 7
+
     clean_ticker = (ticker or "").strip().upper()
     query = _search_term(clean_ticker)
     today = datetime.now(timezone.utc).date()

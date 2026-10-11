@@ -62,7 +62,13 @@ PLANNER_ROLE = (
     "'No companies have been researched yet in this session.' "
     "and invite the user to specify a stock ticker or company to analyze.\n"
     "- You MUST NEVER fabricate, assume, or invent prior companies, tickers, or research history "
-    "from pre-trained memory!"
+    "from pre-trained memory!\n\n"
+    "NO TOOLS, EVER: you have no tools of any kind, including get_history_states, get_state, "
+    "list_state_ids, or list_threads. Everything Rule 8 needs (past tickers, active ticker, "
+    "cached briefs, last workflow metadata) is already given to you above as plain text under "
+    "'Current Context / Attributes' (root_memory). Never write a tool call, a function name, or "
+    "JSON like {\"name\": ..., \"parameters\": ...} in your answer - you cannot call anything; "
+    "just read the context you were given and answer in one or two plain-language sentences."
 )
 
 

@@ -132,6 +132,13 @@ def get_active_tickers(
         ``error`` field if the symbol directory could not be downloaded or
         ``exchange`` is not recognised.
     """
+    # Tool-calling LLMs sometimes send a declared-int argument as a JSON
+    # string (e.g. "50" instead of 50); coerce defensively rather than crash.
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = _DEFAULT_LIMIT
+
     exchange_clean = (exchange or "NASDAQ").strip().upper()
     logger.info(
         "Executing get_active_tickers exchange=%s query=%r limit=%s",

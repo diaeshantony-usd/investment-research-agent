@@ -54,12 +54,19 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
     Returns:
         The compiled graph. Call ``invoke(payload)`` to run it.
     """
-    planner = planner_agent(llm=llm, tools=memory.as_tools())
+    # Neither the Planner nor the Critic gets memory.as_tools(). Everything either would
+    # need - past tickers, the active ticker, cached briefs, last workflow metadata - is
+    # already injected as plain-text context (ResearchSession.root_memory, see
+    # memory/session.py), so the tools are redundant. Worse, a local model handed tools
+    # it has no reliable grasp of tends to narrate a get_history_states JSON dump, or
+    # invent a textual "tool call" instead of using real function-calling, rather than
+    # do its actual job - that's the failure mode these two are carved out to avoid.
+    planner = planner_agent(llm=llm)
     earnings_analyst = earnings_analyst_agent(llm=llm)
     market_analyst = market_analyst_agent(llm=llm)
     news_analyst = news_analyst_agent(llm=llm)
     draft_writer = draft_writer_agent(llm=llm)
-    critic = critic_agent(llm=llm, tools=memory.as_tools())
+    critic = critic_agent(llm=llm)
     refiner = refiner_agent(llm=llm)
 
     workflow = StateGraph(state_schema=GraphState, memory=memory, verbose=False)
