@@ -145,7 +145,7 @@ Every API response is cached in `data/cache/`, so the notebook can re-run withou
 
 ---
 
-## How to run it (planned)
+## How to run it
 
 ```bash
 # setup
@@ -165,6 +165,19 @@ s = ResearchSession("nvda-01")
 s.ask("Analyse NVDA")
 s.ask("How do its margins compare?")   # follow-up in the same session
 ```
+
+```bash
+# Gradio chat UI
+pip install -e ".[ui]"       # adds gradio on top of the base install
+research-agent-ui            # launches at http://127.0.0.1:7860
+# or, without installing the console script:
+python gradio_app.py
+```
+
+Each browser tab gets its own session (shown as a Thread ID in the UI), so
+follow-up questions resolve against that tab's active ticker exactly as in the
+notebook or command line. Enter a thread id and click "Start / Resume" to reopen a
+past conversation from the session store.
 
 API keys needed: an LLM provider, NewsAPI, FRED and Alpha Vantage (free tiers).
 

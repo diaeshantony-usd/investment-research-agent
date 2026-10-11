@@ -36,6 +36,7 @@ ui = [
 
 [project.scripts]
 research-agent = "research_agent.workflows.session:main"
+research-agent-ui = "research_agent.interfaces.chat_ui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
