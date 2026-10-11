@@ -20,6 +20,7 @@ from research_agent.memory.tickers import (
     extract_tickers,
     is_follow_up,
     needs_company_reference,
+    resolve_tickers,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "extract_tickers",
     "is_follow_up",
     "needs_company_reference",
+    "resolve_tickers",
 ]

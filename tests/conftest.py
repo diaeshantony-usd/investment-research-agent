@@ -67,3 +67,14 @@ def temp_memory_file():
 def temp_memory(temp_memory_file: str) -> GraphMemory:
     """Provides an isolated GraphMemory instance with automatic cleanup."""
     return GraphMemory(filepath=temp_memory_file)
+
+
+@pytest.fixture(autouse=True)
+def _offline_yahoo_search(monkeypatch):
+    """Keep tests offline: Yahoo Finance search behaves as unreachable unless a test
+    replaces it. Ticker lookups then fail open, exactly as without a network."""
+
+    def unreachable(query, fuzzy=False):
+        raise ConnectionError("Yahoo Finance search disabled in tests")
+
+    monkeypatch.setattr("research_agent.memory.tickers._yahoo_search", unreachable)

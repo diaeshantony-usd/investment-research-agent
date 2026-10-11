@@ -47,6 +47,7 @@ from research_agent.memory.tickers import (
     extract_tickers,
     is_follow_up,
     needs_company_reference,
+    resolve_tickers,
 )
 
 __all__ = [
@@ -101,6 +102,7 @@ class TurnKind(str, Enum):
     FOLLOW_UP = "follow_up"  # refers to the active company without naming it
     GENERAL = "general"  # no company involved (e.g. "What is EBITDA?")
     NEEDS_COMPANY = "needs_company"  # refers to a company, but none is known yet
+    UNKNOWN_TICKER = "unknown_ticker"  # a typed symbol Yahoo does not recognise
     EMPTY = "empty"  # blank input
     ERROR = "error"  # the workflow raised an exception
 
@@ -110,6 +112,7 @@ class TurnKind(str, Enum):
         return self not in (
             TurnKind.EMPTY,
             TurnKind.NEEDS_COMPANY,
+            TurnKind.UNKNOWN_TICKER,
             TurnKind.ERROR,
         )
 
@@ -150,6 +153,7 @@ class _Resolution:
     question: str  # question as sent to the agents (may carry an added context note)
     ticker: str | None
     kind: TurnKind
+    reply: str | None = None  # local answer for kinds that do not run the agents
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +345,9 @@ class ResearchSession:
         if resolution.kind is TurnKind.NEEDS_COMPANY:
             # Answer locally: running the agents without a company would waste a call.
             return self._finish(text, NEEDS_COMPANY_REPLY, kind=resolution.kind, show=show)
+        if resolution.kind is TurnKind.UNKNOWN_TICKER and resolution.reply:
+            # Likely a typo (e.g. NVDAA): suggest the real ticker instead of researching.
+            return self._finish(text, resolution.reply, kind=resolution.kind, show=show)
 
         payload = self._build_payload(resolution.question, resolution.ticker)
         logger.info(
@@ -460,14 +467,24 @@ class ResearchSession:
             The question to send to the agents, its ticker and its ``TurnKind``.
         """
         active = self.active_ticker
-        mentioned = extract_tickers(text)
+        found = resolve_tickers(text)
+        mentioned = list(found.tickers)
 
-        # Case 1: the question explicitly names a company. The first one mentioned becomes active.
+        # Case 1: the question names a company (by symbol, or by name via Yahoo Finance).
+        # The first one mentioned becomes active.
         if mentioned:
             ticker = mentioned[0]
             kind = _ticker_turn_kind(active, ticker)
             self.store.update_thread(self.thread_id, active_ticker=ticker)
             return _Resolution(text, ticker, kind)
+
+        # Case 1b: a typed symbol Yahoo does not know, with a close match ("NVDAA" -> NVDA).
+        if found.unknown and found.suggestion:
+            reply = (
+                f"I couldn't find a stock with the ticker {found.unknown}. "
+                f"Did you mean {found.suggestion}?"
+            )
+            return _Resolution(text, None, TurnKind.UNKNOWN_TICKER, reply=reply)
 
         # Case 2: pronoun follow-up referring to the active company (e.g. "what about its debt?").
         if is_follow_up(text):

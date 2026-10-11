@@ -240,7 +240,7 @@ class TestHelpers:
         [
             ('{"active_ticker": "AAPL"} RESEARCH_REQUIRED: NVDA', "AAPL"),
             ("Prior findings: RESEARCH_REQUIRED: **TSLA** - margins", "TSLA"),
-            ("Tell me about Microsoft", "MSFT"),
+            ("Tell me about MSFT", "MSFT"),
         ],
     )
     def test_resolve_ticker_priority(self, prompt, expected):

@@ -34,6 +34,31 @@ from research_agent.memory.session import EMPTY_INPUT_REPLY, NEEDS_COMPANY_REPLY
 # ---------------------------------------------------------------------------
 
 
+# Test data: what a fake Yahoo Finance search returns for company-name lookups, so
+# lowercase questions such as "tell me about nvidia" resolve without network access.
+FAKE_YAHOO_COMPANIES = {
+    "nvidia": ("NVDA", "NVIDIA Corporation"),
+    "tesla": ("TSLA", "Tesla, Inc."),
+    "apple": ("AAPL", "Apple Inc."),
+}
+
+
+@pytest.fixture(autouse=True)
+def _fake_yahoo(monkeypatch):
+    """Resolve the names above (and confirm typed symbols) like Yahoo search would."""
+    symbols = {symbol for symbol, _ in FAKE_YAHOO_COMPANIES.values()} | {"NVDA", "AAPL", "TSLA"}
+
+    def fake_search(query, fuzzy=False):
+        hit = FAKE_YAHOO_COMPANIES.get(query.lower())
+        if hit:
+            return ({"symbol": hit[0], "name": hit[1], "type": "EQUITY"},)
+        if query.upper() in symbols:
+            return ({"symbol": query.upper(), "name": query, "type": "EQUITY"},)
+        return ()
+
+    monkeypatch.setattr("research_agent.memory.tickers._yahoo_search", fake_search)
+
+
 class FakeWorkflow:
     """Stands in for the compiled agent graph and records every payload it receives."""
 
@@ -96,12 +121,12 @@ def make_session(store, memory, thread="t1", workflow=None, **kw) -> ResearchSes
 
 
 class TestDetection:
-    def test_extract_tickers_symbols_and_names(self):
+    def test_extract_tickers_finds_symbols_only(self):
         assert extract_tickers("Analyse NVIDIA (NVDA) margins") == ["NVDA"]
-        assert extract_tickers("Compare $AMD with Intel") == ["AMD", "INTC"]
-        assert extract_tickers("Compare AMD and Intel") == ["AMD", "INTC"]
-        assert extract_tickers("How is Apple doing?") == ["AAPL"]
+        assert extract_tickers("Compare $AMD with INTC") == ["AMD", "INTC"]
         assert extract_tickers("Look at BRK.B") == ["BRK-B"]
+        # Company names are resolved by resolve_tickers via Yahoo Finance, not here.
+        assert extract_tickers("How is Apple doing?") == []
 
     def test_extract_tickers_ignores_finance_terms(self):
         assert extract_tickers("What is EPS vs PE and GDP in the US?") == []
@@ -121,8 +146,8 @@ class TestDetection:
         assert extract_tickers("") == []
         assert extract_tickers(None) == []
 
-    def test_longest_company_name_wins(self):
-        assert extract_tickers("Advanced Micro Devices guidance") == ["AMD"]
+    def test_company_names_are_not_symbols(self):
+        assert extract_tickers("Advanced Micro Devices guidance") == []
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +530,7 @@ class TestResearchSession:
 
     def test_coverage_unavailable_lifecycle(self, store, memory):
         """When a ticker has no data, Coverage Unavailable brief is returned and not cached."""
+
         class CoverageWorkflow:
             def invoke(self, payload: dict[str, Any]) -> GraphState:
                 state = GraphState(question=payload["question"], thread_id=payload["thread_id"])
@@ -579,9 +605,7 @@ class TestResearchSession:
             self.last_answer = "OK"
 
         monkeypatch.setattr(session_module.ResearchSession, "__init__", mock_init)
-        monkeypatch.setattr(
-            session_module.ResearchSession, "ask", lambda self, q, show=True: None
-        )
+        monkeypatch.setattr(session_module.ResearchSession, "ask", lambda self, q, show=True: None)
 
         session_module.main(["What about NVDA?"])
         session_module.main(["What about NVDA?"])
@@ -590,7 +614,3 @@ class TestResearchSession:
         assert created_threads[0].startswith("cli_")
         assert created_threads[1].startswith("cli_")
         assert created_threads[0] != created_threads[1]
-
-
-
-
