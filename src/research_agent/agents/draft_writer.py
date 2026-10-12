@@ -64,6 +64,9 @@ DRAFT_WRITER_ROLE = (
 )
 
 
+DRAFT_WRITER_DESCRIPTION = "Synthesizing specialist evidence into structured institutional brief"
+
+
 def draft_writer_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -82,6 +85,7 @@ def draft_writer_agent(
     return Agent(
         name="DraftWriter",
         role=DRAFT_WRITER_ROLE,
+        description=DRAFT_WRITER_DESCRIPTION,
         model=model,
         llm=llm,
         verbose=verbose,

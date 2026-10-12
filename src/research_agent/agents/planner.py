@@ -85,6 +85,9 @@ PLANNER_ROLE = (
 )
 
 
+PLANNER_DESCRIPTION = "Analyzing query intent and resolving company ticker symbol"
+
+
 def planner_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -112,6 +115,7 @@ def planner_agent(
     return Agent(
         name="ResearchPlanner",
         role=PLANNER_ROLE,
+        description=PLANNER_DESCRIPTION,
         model=model,
         llm=llm,
         tools=planner_tools,

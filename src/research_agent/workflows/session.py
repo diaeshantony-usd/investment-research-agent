@@ -38,6 +38,12 @@ def _configure_console_utf8() -> None:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
+def _cli_thinking(msg: str) -> None:
+    """Stream live thinking and tool activation messages in real time."""
+    sys.stdout.write(f"  {msg}\n")
+    sys.stdout.flush()
+
+
 def _run_interactive_loop(session: ResearchSession, thread_id: str) -> None:
     """Run interactive REPL loop in the terminal."""
     sys.stdout.write(f"=== Research Session Started [thread_id: {thread_id}] ===\n")
@@ -59,8 +65,13 @@ def _run_interactive_loop(session: ResearchSession, thread_id: str) -> None:
 
                 sys.stdout.write(f"\n{json.dumps(session.root_memory, indent=2, default=str)}\n\n")
                 continue
-            session.ask(user_input, show=False)
-            sys.stdout.write(f"\n{session.last_answer}\n\n")
+            sys.stdout.write(f"\n[Running Workflow for: '{user_input}']\n\n")
+            sys.stdout.flush()
+            try:
+                session.ask(user_input, show=False, on_progress=_cli_thinking)
+            except TypeError:
+                session.ask(user_input, show=False)
+            sys.stdout.write(f"\n=== RELEASED BRIEF ===\n\n{session.last_answer}\n\n")
         except (KeyboardInterrupt, EOFError):
             break
 
@@ -118,8 +129,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.query and args.query.lower() != "interactive":
-        session.ask(args.query, show=False)
-        sys.stdout.write(f"{session.last_answer}\n")
+        sys.stdout.write(f"\n[Running Workflow for: '{args.query}']\n\n")
+        sys.stdout.flush()
+        try:
+            session.ask(args.query, show=False, on_progress=_cli_thinking)
+        except TypeError:
+            session.ask(args.query, show=False)
+        sys.stdout.write(f"\n=== RELEASED BRIEF ===\n\n{session.last_answer}\n")
         return 0
 
     parser.print_help()

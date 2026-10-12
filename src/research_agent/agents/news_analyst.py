@@ -29,6 +29,9 @@ NEWS_ANALYST_ROLE = (
 )
 
 
+NEWS_ANALYST_DESCRIPTION = "Gathering recent headlines, sentiment signals, and catalyst events"
+
+
 def news_analyst_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -47,6 +50,7 @@ def news_analyst_agent(
     return NewsChainAgent(
         name="NewsAnalyst",
         role=NEWS_ANALYST_ROLE,
+        description=NEWS_ANALYST_DESCRIPTION,
         news_tool=get_news_data,
         model=model,
         llm=llm,

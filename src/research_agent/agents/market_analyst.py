@@ -31,6 +31,9 @@ MARKET_ANALYST_ROLE = (
 )
 
 
+MARKET_ANALYST_DESCRIPTION = "Evaluating price action, technical momentum, and macro backdrop"
+
+
 def market_analyst_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -49,6 +52,7 @@ def market_analyst_agent(
     return Agent(
         name="MarketAnalyst",
         role=MARKET_ANALYST_ROLE,
+        description=MARKET_ANALYST_DESCRIPTION,
         tools=[get_market_technicals, get_macro_indicators],
         model=model,
         llm=llm,

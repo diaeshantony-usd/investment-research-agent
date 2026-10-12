@@ -47,6 +47,9 @@ CRITIC_ROLE = (
 )
 
 
+CRITIC_DESCRIPTION = "Auditing draft report for numeric accuracy and factual grounding"
+
+
 def critic_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -71,6 +74,7 @@ def critic_agent(
     return Agent(
         name="ResearchCritic",
         role=CRITIC_ROLE,
+        description=CRITIC_DESCRIPTION,
         tools=tools,
         model=model,
         llm=llm,

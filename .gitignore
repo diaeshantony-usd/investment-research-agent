@@ -24,6 +24,8 @@ logs/
 data/memory/*.json
 data/cache/*.json
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # OS & Editors
 .DS_Store

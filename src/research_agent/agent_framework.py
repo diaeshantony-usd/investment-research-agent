@@ -285,6 +285,7 @@ class Agent:
         max_iterations: int = 10,
         memory: list[dict[str, Any]] | None = None,
         verbose: bool = False,
+        description: str | None = None,
     ) -> None:
         """Create an agent.
 
@@ -298,6 +299,7 @@ class Agent:
             max_iterations: Upper bound on LLM calls per ``run`` (prevents tool loops).
             memory: Optional initial message history.
             verbose: Log every thought, tool call and observation.
+            description: Concise human-readable statement of purpose or responsibility.
         """
         self.llm: LLM
         self.model: str
@@ -317,11 +319,13 @@ class Agent:
 
         self.name = name
         self.role = role or "Specialized AI Analyst"
+        self.description = description or ""
         self.system_prompt = system_prompt or "You are a helpful and rigorous analytical assistant."
         self.max_iterations = max_iterations
         self.verbose = verbose
         self.messages: list[dict[str, Any]] = list(memory) if memory else []
         self.last_response: AgentResponse | None = None
+        self._on_tool_call: Callable[[str, str, dict[str, Any]], None] | None = None
 
         # Register and normalize tools into internal dictionary
         self.tools: dict[str, Tool] = {}
@@ -406,6 +410,9 @@ class Agent:
         if self.verbose:
             logger.info("[ACTION: %s]: Calling tool -> %s", self.name, call_desc)
 
+        if hasattr(self, "_on_tool_call") and callable(self._on_tool_call):
+            self._on_tool_call(self.name, fn_name, fn_args)
+
         if fn_name in self.tools:
             obs = self.tools[fn_name].execute(**fn_args)
         else:
@@ -432,7 +439,23 @@ class Agent:
 
         self.messages.append({"role": "tool", "content": str(obs)})
 
-    def run(self, prompt: str | None = None) -> AgentResponse:
+    def _prepare_run(self, prompt: str | None, on_progress: Callable[[str], None] | None) -> None:
+        """Initializes system prompt, user prompt, and progress announcement."""
+        if not self.messages or self.messages[0].get("role") != "system":
+            self.messages.insert(0, {"role": "system", "content": self._format_system_prompt()})
+
+        if prompt:
+            self.messages.append({"role": "user", "content": prompt})
+
+        if on_progress:
+            desc = self.description or self.name
+            on_progress(f"Thinking: {desc}...")
+
+    def run(
+        self,
+        prompt: str | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> AgentResponse:
         """Run the ReAct loop until the model answers without calling a tool.
 
         Each iteration sends the conversation to the LLM, executes any requested tools
@@ -442,17 +465,14 @@ class Agent:
         Args:
             prompt: New user message to append before running. ``None`` continues the
                 existing conversation.
+            on_progress: Optional callback invoked with live thinking/action messages.
 
         Returns:
             The final answer, the step-by-step trace and the full message history.
         """
-        # Ensure system prompt is initialized at index 0 of message history
-        if not self.messages or self.messages[0].get("role") != "system":
-            self.messages.insert(0, {"role": "system", "content": self._format_system_prompt()})
+        self._prepare_run(prompt, on_progress)
 
-        if prompt:
-            self.messages.append({"role": "user", "content": prompt})
-
+        cleanup = _attach_tool_hooks(self, on_progress)
         trace: list[TraceStep] = []
         iteration = 0
         final_text = ""
@@ -460,37 +480,40 @@ class Agent:
         if self.verbose:
             self._log_activation(prompt)
 
-        while iteration < self.max_iterations:
-            iteration += 1
-            now = _local_now(_CLOCK_FORMAT)
+        try:
+            while iteration < self.max_iterations:
+                iteration += 1
+                now = _local_now(_CLOCK_FORMAT)
 
-            try:
-                content, tool_calls, raw_msg = self.llm.chat(self.messages, self.tools)
-            except Exception as e:  # noqa: BLE001 - any provider error ends this agent only
-                err_msg = f"API Error communicating with model '{self.model}': {e!s}"
-                if self.verbose:
-                    logger.error("[ERROR: %s] %s", self.name, err_msg)
-                trace.append(TraceStep(now, self.name, "error", err_msg))
-                return AgentResponse(
-                    self.name, prompt or "", err_msg, trace, self.messages, iteration
-                )
+                try:
+                    content, tool_calls, raw_msg = self.llm.chat(self.messages, self.tools)
+                except Exception as e:  # noqa: BLE001 - any provider error ends this agent only
+                    err_msg = f"API Error communicating with model '{self.model}': {e!s}"
+                    if self.verbose:
+                        logger.error("[ERROR: %s] %s", self.name, err_msg)
+                    trace.append(TraceStep(now, self.name, "error", err_msg))
+                    return AgentResponse(
+                        self.name, prompt or "", err_msg, trace, self.messages, iteration
+                    )
 
-            self.messages.append(raw_msg)
+                self.messages.append(raw_msg)
 
-            if content:
-                trace.append(TraceStep(now, self.name, "thought", content))
-                if self.verbose and tool_calls:
-                    logger.info("[THOUGHT: %s]: %s", self.name, content)
+                if content:
+                    trace.append(TraceStep(now, self.name, "thought", content))
+                    if self.verbose and tool_calls:
+                        logger.info("[THOUGHT: %s]: %s", self.name, content)
 
-            if not tool_calls:
-                final_text = content or "(No text returned)"
-                trace.append(TraceStep(now, self.name, "final_answer", final_text))
-                if self.verbose:
-                    logger.info("[FINAL ANSWER: %s]:\n%s", self.name, final_text)
-                break
+                if not tool_calls:
+                    final_text = content or "(No text returned)"
+                    trace.append(TraceStep(now, self.name, "final_answer", final_text))
+                    if self.verbose:
+                        logger.info("[FINAL ANSWER: %s]:\n%s", self.name, final_text)
+                    break
 
-            for call in tool_calls:
-                self._execute_tool_call(call, now, trace)
+                for call in tool_calls:
+                    self._execute_tool_call(call, now, trace)
+        finally:
+            cleanup()
 
         if iteration >= self.max_iterations and not final_text:
             final_text = (
@@ -569,6 +592,7 @@ class OrchestratorAgent(Agent):
         model: str = DEFAULT_MODEL,
         max_iterations: int = 12,
         verbose: bool = True,
+        description: str | None = None,
     ) -> None:
         self.subagents: dict[str, Agent] = {}
         orchestrator_tools: list[Tool | Callable[..., Any]] = []
@@ -603,6 +627,7 @@ class OrchestratorAgent(Agent):
         super().__init__(
             name=name,
             role=role or default_role,
+            description=description,
             llm=llm,
             system_prompt=None,
             tools=orchestrator_tools,
@@ -1051,6 +1076,65 @@ def _format_node_mermaid(
     return lines
 
 
+def _format_node_progress(node_name: str, node_target: Any = None) -> str:
+    """Generically formats a progress/thinking message from the node target metadata."""
+    if node_target is not None:
+        desc = getattr(node_target, "description", None)
+        if desc:
+            return f"Thinking: {desc}..."
+        if isinstance(node_target, Agent):
+            return f"Thinking: [{node_target.name}] Analyzing and executing tasks..."
+        if isinstance(node_target, list):
+            names = [getattr(a, "name", str(a)) for a in node_target]
+            return f"Thinking: Running parallel specialists [{', '.join(names)}]..."
+        if callable(node_target):
+            doc = (inspect.getdoc(node_target) or "").strip().split("\n")[0]
+            if doc:
+                return f"Thinking: {doc}..."
+    return f"Thinking: Executing workflow node '{node_name}'..."
+
+
+def _format_tool_progress(agent: Agent, fn_name: str, fn_args: dict[str, Any]) -> str:
+    """Generically formats tool execution progress from tool and agent metadata."""
+    tool_obj = agent.tools.get(fn_name)
+    desc = getattr(tool_obj, "description", None) or ""
+    if desc:
+        summary = desc.strip().split(".")[0]
+        return f"Tool: [{agent.name}] {fn_name} - {summary}..."
+    args_preview = ", ".join(f"{k}={v!r}" for k, v in fn_args.items())
+    if len(args_preview) > 60:
+        args_preview = args_preview[:57] + "..."
+    return f"Tool: [{agent.name}] Calling {fn_name}({args_preview})..."
+
+
+def _attach_tool_hooks(
+    agent: Agent, on_progress: Callable[[str], None] | None
+) -> Callable[[], None]:
+    """Attaches progress listeners to agent tools and returns a cleanup callback."""
+    if on_progress is None:
+        return lambda: None
+
+    targets = [agent]
+    if hasattr(agent, "subagents") and isinstance(agent.subagents, dict):
+        targets.extend(agent.subagents.values())
+
+    for tgt in targets:
+
+        def _make_hook(target_agent: Agent) -> Callable[[str, str, dict[str, Any]], None]:
+            return lambda _aname, tname, targs: on_progress(
+                _format_tool_progress(target_agent, tname, targs)
+            )
+
+        tgt._on_tool_call = _make_hook(tgt)
+
+    def _cleanup() -> None:
+        for tgt in targets:
+            if hasattr(tgt, "_on_tool_call"):
+                tgt._on_tool_call = None
+
+    return _cleanup
+
+
 class CompiledStateGraph:
     """Immutable execution engine compiled from StateGraph."""
 
@@ -1249,6 +1333,7 @@ class CompiledStateGraph:
         state: GraphState,
         step_count: int,
         start_time: str,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         """Run a group of independent agents (sequentially) as one workflow node."""
         active_agents = agents
@@ -1260,7 +1345,7 @@ class CompiledStateGraph:
         tools_called = set()
         for agent in active_agents:
             p = self._build_agent_prompt(agent, state)
-            resp = agent.run(p)
+            resp = agent.run(p, on_progress=on_progress)
             state.agents[agent.name] = resp.content
             self._harvest_agent_tools(agent, resp, state)
             for t in agent.tools:
@@ -1332,12 +1417,17 @@ class CompiledStateGraph:
         state: GraphState,
         step_count: int,
         start_time: str,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         """Run a single agent node and record its output and tool usage."""
-        p = self._build_agent_prompt(agent, state)
-        resp = agent.run(p)
-        state.agents[agent.name] = resp.content
-        self._harvest_agent_tools(agent, resp, state)
+        cleanup = _attach_tool_hooks(agent, on_progress)
+        try:
+            p = self._build_agent_prompt(agent, state)
+            resp = agent.run(p)
+            state.agents[agent.name] = resp.content
+            self._harvest_agent_tools(agent, resp, state)
+        finally:
+            cleanup()
 
         tools_called = [
             t
@@ -1493,13 +1583,21 @@ class CompiledStateGraph:
                     state.output = state.output[idx:].strip()
                     break
 
-    def invoke(self, state: GraphState | dict[str, Any], max_steps: int = 25) -> GraphState:
+    def invoke(
+        self,
+        state: GraphState | dict[str, Any],
+        max_steps: int = 25,
+        on_step: Callable[[dict[str, Any]], None] | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> GraphState:
         """Run the graph from the entry point until ``END`` or ``max_steps``.
 
         Args:
             state: A ``GraphState`` or a payload dict. Unknown dict keys become extra
                 state attributes and are shown to agents as context.
             max_steps: Safety limit on node executions (guards against routing loops).
+            on_step: Optional callback invoked with the latest step dict after each node runs.
+            on_progress: Optional callback invoked with live thinking/action messages.
 
         Returns:
             The final state; the run is also checkpointed in ``memory``.
@@ -1529,6 +1627,11 @@ class CompiledStateGraph:
             if node_target is None:
                 raise ValueError(f"Target node '{current_node}' not found in graph nodes.")
 
+            if on_progress is not None:
+                progress_msg = _format_node_progress(current_node, node_target)
+                if progress_msg:
+                    on_progress(progress_msg)
+
             node_start_time = _local_now(_CLOCK_FORMAT)
 
             if isinstance(node_target, list):
@@ -1538,6 +1641,7 @@ class CompiledStateGraph:
                     current_state,
                     step_count,
                     node_start_time,
+                    on_progress=on_progress,
                 )
             elif isinstance(node_target, Agent):
                 self._execute_agent_node(
@@ -1546,6 +1650,7 @@ class CompiledStateGraph:
                     current_state,
                     step_count,
                     node_start_time,
+                    on_progress=on_progress,
                 )
             elif callable(node_target):
                 current_state = self._execute_function_node(
@@ -1555,6 +1660,9 @@ class CompiledStateGraph:
                     step_count,
                     node_start_time,
                 )
+
+            if on_step is not None and current_state.trajectory:
+                on_step(current_state.trajectory[-1])
 
             current_node = self._determine_next_node(current_node, current_state)
 

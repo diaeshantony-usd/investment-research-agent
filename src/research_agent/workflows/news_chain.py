@@ -194,16 +194,25 @@ class NewsChainAgent(Agent):
 
     # ------------------------------------------------------------------ entry point
 
-    def run(self, prompt: str | None = None) -> AgentResponse:
+    def run(
+        self,
+        prompt: str | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> AgentResponse:
         """Run all five stages for the ticker named in ``prompt``.
 
         Args:
             prompt: The graph's agent prompt (user request, context and prior findings).
+            on_progress: Optional callback invoked with live thinking/action messages.
 
         Returns:
             An ``AgentResponse`` whose content is a cited Markdown news digest and whose
             trace records the tool call and every stage's intermediate result.
         """
+        if on_progress:
+            desc = self.description or self.name
+            on_progress(f"Thinking: {desc}...")
+
         trace: list[TraceStep] = []
         llm_calls = 0
         ticker = _resolve_ticker(prompt or "")
@@ -237,6 +246,8 @@ class NewsChainAgent(Agent):
         trace.append(
             TraceStep(_clock(), self.name, "tool_call", {"tool": _NEWS_TOOL, "arguments": args})
         )
+        if getattr(self, "_on_tool_call", None) and callable(self._on_tool_call):
+            self._on_tool_call(self.name, _NEWS_TOOL, args)
         observation = self.news_tool.execute(**args)
         trace.append(
             TraceStep(

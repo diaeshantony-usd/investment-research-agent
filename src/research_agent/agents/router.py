@@ -34,6 +34,9 @@ ROUTER_ROLE = (
 )
 
 
+ROUTER_DESCRIPTION = "Decomposing research brief and dispatching specialist analyst team"
+
+
 def router_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -67,6 +70,7 @@ def router_agent(
     return OrchestratorAgent(
         name="ResearchRouter",
         role=ROUTER_ROLE,
+        description=ROUTER_DESCRIPTION,
         subagents=subagents,
         tools=tools,
         llm=chosen_llm,

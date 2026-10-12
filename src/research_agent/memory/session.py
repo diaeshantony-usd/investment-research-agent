@@ -161,6 +161,22 @@ class _Resolution:
 # ---------------------------------------------------------------------------
 
 
+def _invoke_app(
+    app: Any,
+    payload: dict[str, Any],
+    on_step: Any,
+    on_progress: Any,
+) -> GraphState:
+    """Invokes underlying workflow, forwarding optional telemetry callbacks."""
+    for cb, kw in ((on_progress, "on_progress"), (on_step, "on_step")):
+        if cb is not None:
+            try:
+                return app.invoke(payload, **{kw: cb})
+            except TypeError:
+                pass
+    return app.invoke(payload)
+
+
 class ResearchSession:
     """Multi-turn research conversation with persistent, thread-scoped memory.
 
@@ -322,13 +338,21 @@ class ResearchSession:
 
     # ------------------------------------------------------------------ public API
 
-    def ask(self, question: str | None, show: bool = True) -> str | None:
+    def ask(
+        self,
+        question: str | None,
+        show: bool = True,
+        on_step: Callable[[dict[str, Any]], None] | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> str | None:
         """Answer one question within this conversation.
 
         Args:
             question: The user's question. Blank input gets a short prompt back.
             show: When True, render the question, answer and agent trajectory as
                 Markdown (for notebooks) and return None. When False, return the text.
+            on_step: Optional callback invoked as each workflow node completes.
+            on_progress: Optional callback invoked with live thinking/action messages.
 
         Returns:
             The answer text when ``show`` is False, otherwise None.
@@ -359,7 +383,7 @@ class ResearchSession:
         )
 
         try:
-            state = self._app.invoke(payload)
+            state = _invoke_app(self._app, payload, on_step, on_progress)
         except Exception as exc:
             # Keep the conversation history complete, then surface a single, clear
             # error type to the caller. The original exception is chained for debugging.

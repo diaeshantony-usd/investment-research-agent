@@ -32,6 +32,9 @@ EARNINGS_ANALYST_ROLE = (
 )
 
 
+EARNINGS_ANALYST_DESCRIPTION = "Extracting quarterly earnings, fundamentals, and SEC filings"
+
+
 def earnings_analyst_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -50,6 +53,7 @@ def earnings_analyst_agent(
     return Agent(
         name="EarningsAnalyst",
         role=EARNINGS_ANALYST_ROLE,
+        description=EARNINGS_ANALYST_DESCRIPTION,
         tools=[get_earnings_data, search_sec_filings],
         model=model,
         llm=llm,

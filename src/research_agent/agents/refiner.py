@@ -36,6 +36,9 @@ REFINER_ROLE = (
 )
 
 
+REFINER_DESCRIPTION = "Refining draft sections and grounding unverified assertions"
+
+
 def refiner_agent(
     model: str | LLM | None = None,
     llm: LLM | None = None,
@@ -65,6 +68,7 @@ def refiner_agent(
     return Agent(
         name="BriefRefiner",
         role=REFINER_ROLE,
+        description=REFINER_DESCRIPTION,
         tools=tools or default_tools,
         model=model,
         llm=llm,

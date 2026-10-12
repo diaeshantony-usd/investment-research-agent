@@ -886,4 +886,14 @@ def make_review_nodes(
             "released": f"round {best['round']} ({'passed' if best['passed'] else 'with notes'})"
         }
 
+    critic_node.description = (  # type: ignore[attr-defined]
+        "Auditing draft report for numeric accuracy and factual grounding"
+    )
+    refiner_node.description = (  # type: ignore[attr-defined]
+        "Refining draft sections and grounding unverified assertions"
+    )
+    release_node.description = (  # type: ignore[attr-defined]
+        "Finalizing published institutional research briefing"
+    )
+
     return critic_node, refiner_node, release_node, route_review
