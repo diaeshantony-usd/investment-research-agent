@@ -11,6 +11,8 @@ Graph wiring: N L N Sai Krishna Akula. Critic / Refiner review loop
 
 from __future__ import annotations
 
+import contextlib
+import json
 from typing import Any
 
 from research_agent.agent_framework import (
@@ -27,6 +29,7 @@ from research_agent.agents import (
     news_analyst_agent,
     planner_agent,
     refiner_agent,
+    router_agent,
 )
 from research_agent.config import logger
 from research_agent.workflows.review_loop import make_review_nodes
@@ -55,33 +58,44 @@ def _looks_like_stale_pretrained_recall(plan_text: str) -> bool:
 
 
 def route_planner(state: GraphState) -> str:
-    """Run the specialists when the planner asked for research, or its "from memory"
-    answer looks like ungrounded pre-trained recall rather than the cached brief.
+    """Run research dispatch when the planner decided research is needed,
+    or its memory answer looks like ungrounded pre-trained recall.
     """
-    plan = state.agents.get("ResearchPlanner", "")
-    if "RESEARCH_REQUIRED" in plan.upper():
-        return "specialists"
-    if _looks_like_stale_pretrained_recall(plan):
-        logger.warning(
-            "Planner's memory-recall answer looks ungrounded (stale-knowledge phrasing "
-            "found); forcing a live research dispatch instead of trusting it."
-        )
-        return "specialists"
+    plan = state.agents.get("ResearchPlanner")
+    if isinstance(plan, dict):
+        if plan.get("research_required") is True:
+            return "orchestrator"
+        return END
+
+    plan_str = str(plan or "")
+    if plan_str:
+        with contextlib.suppress(json.JSONDecodeError, ValueError):
+            parsed = json.loads(plan_str)
+            if isinstance(parsed, dict) and parsed.get("research_required") is True:
+                return "orchestrator"
+        if "RESEARCH_REQUIRED" in plan_str.upper():
+            return "orchestrator"
+        if _looks_like_stale_pretrained_recall(plan_str):
+            logger.warning(
+                "Planner's memory-recall answer looks ungrounded (stale-knowledge phrasing "
+                "found); forcing a live research dispatch instead of trusting it."
+            )
+            return "orchestrator"
     return END
 
 
-def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph:
+def build_research_workflow(
+    llm: Any,
+    memory: GraphMemory,
+) -> CompiledStateGraph:
     """Build and compile the research agent graph.
 
     Flow::
 
-        planner --(RESEARCH_REQUIRED)--> specialists (earnings, market, news in parallel)
+        planner --(RESEARCH_REQUIRED)--> orchestrator (delegates to specialists as tools)
                 --> draft_writer --> critic --(revise)--> refiner --> critic ...
                                      critic --(pass / stop rule)--> release --> END
         planner --(otherwise)--> END
-
-    The critic checks the brief against the raw tool data and the refiner fixes what it
-    flags; stopping rules and release are described in ``workflows/review_loop.py``.
 
     Args:
         llm: Chat model client shared by every agent.
@@ -94,6 +108,10 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
     earnings_analyst = earnings_analyst_agent(llm=llm)
     market_analyst = market_analyst_agent(llm=llm)
     news_analyst = news_analyst_agent(llm=llm)
+    orchestrator = router_agent(
+        llm=llm,
+        subagents=[earnings_analyst, market_analyst, news_analyst],
+    )
     draft_writer = draft_writer_agent(llm=llm)
     critic_node, refiner_node, release_node, route_review = make_review_nodes(
         llm=llm, refiner=refiner_agent(llm=llm)
@@ -101,7 +119,7 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
 
     workflow = StateGraph(state_schema=GraphState, memory=memory, verbose=False)
     workflow.add_node("planner", planner)
-    workflow.add_node("specialists", [earnings_analyst, market_analyst, news_analyst])
+    workflow.add_node("orchestrator", orchestrator)
     workflow.add_node("draft_writer", draft_writer)
     workflow.add_node("critic", critic_node)
     workflow.add_node("refiner", refiner_node)
@@ -111,9 +129,13 @@ def build_research_workflow(llm: Any, memory: GraphMemory) -> CompiledStateGraph
     workflow.add_conditional_edges(
         "planner",
         decider=route_planner,
-        route_map={"specialists": "specialists", END: END},
+        route_map={
+            "orchestrator": "orchestrator",
+            "specialists": "orchestrator",
+            END: END,
+        },
     )
-    workflow.add_edge("specialists", "draft_writer")
+    workflow.add_edge("orchestrator", "draft_writer")
     workflow.add_edge("draft_writer", "critic")
 
     workflow.add_conditional_edges(

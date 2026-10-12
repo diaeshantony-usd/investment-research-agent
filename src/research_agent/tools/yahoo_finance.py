@@ -138,6 +138,49 @@ def get_ticker_details(ticker: str) -> dict[str, Any]:
 
 
 @tool(
+    name="lookup_ticker",
+    description=(
+        "Searches Yahoo Finance for a company name to look up and return its official "
+        "stock ticker symbol (e.g. 'nvidia' -> 'NVDA', 'Costco' -> 'COST', 'Apple' -> 'AAPL')."
+    ),
+)
+@cached("lookup_ticker", ttl_seconds=ONE_DAY)
+def lookup_ticker(company_name: str = "", query: str = "") -> dict[str, Any]:
+    """Look up the official stock ticker for a company name via Yahoo Finance.
+
+    Args:
+        company_name: Company name to look up (e.g. 'NVIDIA', 'Costco Wholesale', 'Apple').
+        query: Optional alias for company_name.
+
+    Returns:
+        Dict containing confirmed 'ticker', matched 'company', and 'source'.
+    """
+    clean = (company_name or query or "").strip()
+    if not clean:
+        raise ValueError("company_name must not be empty")
+
+    from research_agent.memory.tickers import _search_or_none, _symbol_exists, resolve_tickers
+
+    res = resolve_tickers(clean)
+    if res.tickers:
+        return {"ticker": res.tickers[0], "company": clean, "source": "yahoo_finance"}
+
+    quotes = _search_or_none(clean) or ()
+    for q in quotes:
+        if q.get("type") in ("EQUITY", "ETF") and q.get("symbol"):
+            return {
+                "ticker": q["symbol"],
+                "company": q.get("name") or clean,
+                "source": "yahoo_finance",
+            }
+
+    if _symbol_exists(clean.upper()):
+        return {"ticker": clean.upper(), "company": clean, "source": "yahoo_finance"}
+
+    raise ValueError(f"No ticker found for '{clean}' on Yahoo Finance")
+
+
+@tool(
     name="get_historical_data",
     description=(
         "Retrieves daily/weekly/monthly OHLCV price candles for one stock ticker from Yahoo "

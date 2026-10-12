@@ -95,6 +95,9 @@ class ScriptedLLM(LLM):
         reply = self.replies.pop(0) if self.replies else ""
         if isinstance(reply, Exception):
             raise reply
+        if isinstance(reply, tuple):
+            text, calls = reply
+            return text, calls, {"role": "assistant", "content": text, "tool_calls": calls}
         return reply, [], {"role": "assistant", "content": reply}
 
 
@@ -292,13 +295,20 @@ def test_news_analyst_runs_inside_the_graph(monkeypatch):
     llm = ScriptedLLM(
         [
             "RESEARCH_REQUIRED: NVDA - news",  # Planner
-            "Earnings summary",  # EarningsAnalyst (no tool call)
-            "Market summary",  # MarketAnalyst (no tool call)
+            (
+                "Delegating to news...",
+                [
+                    {
+                        "name": "delegate_to_newsanalyst",
+                        "args": {"task_description": "Analyze recent NVDA news"},
+                    }
+                ],
+            ),  # Orchestrator turn 1
             CLASSIFY_REPLY,  # NewsAnalyst stage 3
             EXTRACT_REPLY,  # NewsAnalyst stage 4
             SUMMARY_REPLY,  # NewsAnalyst stage 5
-            "# Research Brief: NVDA",  # DraftWriter
-            "SCORE: 9/10 STATUS: PASS",  # Critic
+            "Synthesized news findings.",  # Orchestrator turn 2
+            "# Research Brief: NVDA - Data Unavailable",  # DraftWriter
         ]
     )
     state = build_research_workflow(llm=llm, memory=GraphMemory()).invoke(
@@ -306,5 +316,6 @@ def test_news_analyst_runs_inside_the_graph(monkeypatch):
     )
     assert "## News digest: NVDA" in state.agents["NewsAnalyst"]
     assert "get_news_data" in state.tools["NewsAnalyst"]
-    specialists = next(s for s in state.trajectory if s["node"] == "specialists")
-    assert "get_news_data" in specialists["tools"]
+    orch_step = next(s for s in state.trajectory if s["node"] == "orchestrator")
+    assert "delegate_to_newsanalyst" in orch_step["tools"]
+    assert "get_news_data" in orch_step["tools"]

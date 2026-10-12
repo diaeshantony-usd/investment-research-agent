@@ -20,6 +20,10 @@ from research_agent.agents.news_analyst import (
 )
 from research_agent.agents.planner import PLANNER_ROLE, planner_agent
 from research_agent.agents.refiner import REFINER_ROLE, refiner_agent
+from research_agent.agents.router import (
+    ROUTER_ROLE,
+    router_agent,
+)
 
 __all__ = [
     "CRITIC_ROLE",
@@ -29,6 +33,7 @@ __all__ = [
     "NEWS_ANALYST_ROLE",
     "PLANNER_ROLE",
     "REFINER_ROLE",
+    "ROUTER_ROLE",
     "critic_agent",
     "draft_writer_agent",
     "earnings_analyst_agent",
@@ -36,4 +41,5 @@ __all__ = [
     "news_analyst_agent",
     "planner_agent",
     "refiner_agent",
+    "router_agent",
 ]

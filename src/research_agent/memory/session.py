@@ -383,9 +383,14 @@ class ResearchSession:
         # (e.g. from semantic reasoning), keep recorded ticker synchronized with Planner.
         effective_ticker = resolution.ticker
         if hasattr(state, "agents") and "ResearchPlanner" in state.agents:
-            plan_text = state.agents["ResearchPlanner"]
-            if "RESEARCH_REQUIRED" in plan_text.upper():
-                plan_tickers = extract_tickers(plan_text)
+            plan_val = state.agents["ResearchPlanner"]
+            if isinstance(plan_val, dict) and plan_val.get("research_required"):
+                planned_ticker = plan_val.get("ticker")
+                if planned_ticker and planned_ticker != effective_ticker:
+                    effective_ticker = planned_ticker
+                    self.store.update_thread(self.thread_id, active_ticker=planned_ticker)
+            elif isinstance(plan_val, str) and "RESEARCH_REQUIRED" in plan_val.upper():
+                plan_tickers = extract_tickers(plan_val)
                 if plan_tickers:
                     planned_ticker = plan_tickers[0]
                     if planned_ticker != effective_ticker:

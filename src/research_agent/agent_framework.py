@@ -196,13 +196,28 @@ class AgentResponse:
 
     agent_name: str
     input_prompt: str
-    content: str
+    content: Any
     trace: list[TraceStep]
     messages: list[dict[str, Any]]
     iterations: int
+    response_type: str = "text"
 
     def __str__(self) -> str:
-        return self.content
+        if isinstance(self.content, (dict, list)):
+            return json.dumps(self.content, indent=2)
+        return str(self.content)
+
+    @property
+    def data(self) -> dict[str, Any] | None:
+        """Returns parsed dict payload if available, else None."""
+        if isinstance(self.content, dict):
+            return self.content
+        if isinstance(self.content, str):
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
+                val = json.loads(self.content)
+                if isinstance(val, dict):
+                    return val
+        return None
 
     def display_trace(self) -> None:
         """Write each reasoning step of this run to the project log."""
@@ -224,8 +239,29 @@ class AgentResponse:
 
 
 # ===========================================================================
-# Autonomous Agent Engine
-# ===========================================================================
+def _parse_response_content(final_text: str, agent_name: str) -> tuple[str, Any]:
+    """Parse agent output text into structured JSON if applicable, returning (type, content)."""
+    if not isinstance(final_text, str) or agent_name in {"DraftWriter", "Refiner", "BriefRefiner"}:
+        return "text", final_text
+
+    stripped = final_text.strip()
+    parsed = None
+    if stripped.startswith("```"):
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped)
+        if match:
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
+                parsed = json.loads(match.group(1).strip())
+    if parsed is None and (
+        (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
+    ):
+        with contextlib.suppress(json.JSONDecodeError, ValueError):
+            parsed = json.loads(stripped)
+
+    if parsed is not None and isinstance(parsed, (dict, list)):
+        return "json", parsed
+
+    return "text", final_text
 
 
 class Agent:
@@ -285,6 +321,7 @@ class Agent:
         self.max_iterations = max_iterations
         self.verbose = verbose
         self.messages: list[dict[str, Any]] = list(memory) if memory else []
+        self.last_response: AgentResponse | None = None
 
         # Register and normalize tools into internal dictionary
         self.tools: dict[str, Tool] = {}
@@ -469,14 +506,115 @@ class Agent:
                 )
             )
 
-        return AgentResponse(
+        response_type, output_content = _parse_response_content(final_text, self.name)
+
+        resp = AgentResponse(
             agent_name=self.name,
             input_prompt=prompt or "",
-            content=final_text,
+            content=output_content,
             trace=trace,
             messages=self.messages,
             iterations=iteration,
+            response_type=response_type,
         )
+        self.last_response = resp
+        return resp
+
+    def as_tool(self, name: str | None = None, description: str | None = None) -> Tool:
+        """Convert this agent into a callable Tool so other agents can invoke it.
+
+        This is the foundation of hierarchical multi-agent orchestration.
+        """
+        tool_name = name or f"delegate_to_{re.sub(r'[^a-zA-Z0-9_]', '_', self.name.lower())}"
+        tool_desc = (
+            description
+            or f"Delegates a sub-task to the specialist agent '{self.name}'. "
+            f"Specialty/Role: {self.role}. "
+            "Pass a clear, detailed task description for the agent to solve."
+        )
+
+        def agent_tool_function(task_description: str) -> str:
+            """Execute a sub-task by delegating to this specialist agent.
+
+            Args:
+                task_description: Clear, detailed instruction for the specialist agent.
+            """
+            response = self.run(task_description)
+            self.last_response = response
+            if isinstance(response.content, (dict, list)):
+                return json.dumps(response.content, indent=2)
+            return str(response.content)
+
+        agent_tool_function.__name__ = tool_name
+        agent_tool_function.__doc__ = tool_desc
+
+        return Tool(name=tool_name, description=tool_desc, func=agent_tool_function)
+
+
+# ===========================================================================
+# Orchestrator / Supervisor Agent
+# ===========================================================================
+
+
+class OrchestratorAgent(Agent):
+    """Supervisor agent coordinating multiple sub-agents and tools to solve complex goals."""
+
+    def __init__(
+        self,
+        name: str = "LeadOrchestrator",
+        role: str | None = None,
+        subagents: Sequence[Agent] | None = None,
+        tools: Sequence[Tool | Callable[..., Any]] | None = None,
+        llm: LLM | None = None,
+        model: str = DEFAULT_MODEL,
+        max_iterations: int = 12,
+        verbose: bool = True,
+    ) -> None:
+        self.subagents: dict[str, Agent] = {}
+        orchestrator_tools: list[Tool | Callable[..., Any]] = []
+
+        if tools:
+            orchestrator_tools.extend(tools)
+
+        subagent_descriptions = []
+        if subagents:
+            for sa in subagents:
+                self.subagents[sa.name] = sa
+                agent_as_tool = sa.as_tool()
+                orchestrator_tools.append(agent_as_tool)
+                subagent_descriptions.append(f"- **{sa.name}** ({agent_as_tool.name}): {sa.role}")
+
+        subagent_roster = "\n".join(subagent_descriptions) if subagent_descriptions else "None"
+
+        default_role = (
+            "You are the Lead Multi-Agent Orchestrator and Supervisor.\n"
+            "Your objective is to solve complex, multi-step queries by decomposing them into "
+            "sub-tasks, delegating each sub-task to the most capable specialized sub-agent or "
+            "tool, and synthesizing the findings into a cohesive, high-quality final report.\n\n"
+            f"Your Team of Specialist Sub-Agents:\n{subagent_roster}\n\n"
+            "Orchestration Protocol:\n"
+            "1. Deconstruct the user prompt into logical steps.\n"
+            "2. Invoke specialist sub-agents for domain-specific work.\n"
+            "3. Use direct tools when quick calculations or utilities are required.\n"
+            "4. If a sub-agent's output is incomplete or ambiguous, delegate a refined query.\n"
+            "5. Synthesize all collected evidence into a structured final response for the user."
+        )
+
+        super().__init__(
+            name=name,
+            role=role or default_role,
+            llm=llm,
+            system_prompt=None,
+            tools=orchestrator_tools,
+            model=model,
+            max_iterations=max_iterations,
+            verbose=verbose,
+        )
+
+    def add_subagent(self, subagent: Agent) -> None:
+        """Add a new sub-agent to the orchestrator team dynamically."""
+        self.subagents[subagent.name] = subagent
+        self.add_tool(subagent.as_tool())
 
 
 # ===========================================================================
@@ -854,6 +992,67 @@ def _extract_tool_activity(trace: list[TraceStep]) -> list[dict[str, Any]]:
     return activities
 
 
+_MERMAID_NODE_DESCRIPTIONS: dict[str, str] = {
+    "ResearchPlanner": "<br/>(Intent Classifier & Memory Recall)",
+    "ResearchRouter": "<br/>(Lead Orchestrator)",
+    "DraftWriter": "<br/>(Synthesis & Report Generator)",
+    "critic": "<br/>(Factual Audit & Grounding Gate)",
+    "refiner": "<br/>(Targeted Section Optimizer)",
+    "release": "<br/>(Publication & Release Gate)",
+}
+
+_MERMAID_EDGE_LABELS: dict[tuple[str, str], str] = {
+    ("planner", "orchestrator"): "RESEARCH_REQUIRED",
+    ("planner", "__end__"): "Direct Concept Answer",
+    ("critic", "refiner"): "score < 8.0 / ungrounded",
+    ("critic", "release"): "score >= 8.0",
+}
+
+
+def _format_node_mermaid(
+    name: str, target: Any, subagent_links: list[tuple[str, str, str]]
+) -> list[str]:
+    """Format Mermaid node definition for a graph node."""
+    lines: list[str] = []
+    desc = _MERMAID_NODE_DESCRIPTIONS.get(
+        getattr(target, "name", name), _MERMAID_NODE_DESCRIPTIONS.get(name, "")
+    )
+    if isinstance(target, list):
+        names = ", ".join(a.name for a in target)
+        lines.append(f'    {name}["Parallel: [{names}]"]')
+    elif isinstance(target, Agent):
+        subagents = getattr(target, "subagents", None)
+        if isinstance(subagents, dict):
+            lines.append(f'    {name}["Agent: {target.name}{desc}"]')
+            lines.append("")
+            lines.append(
+                '    subgraph Specialists ["Specialist Sub-Agents & '
+                'Tools (Dynamic ReAct Delegation)"]'
+            )
+            for sa_name, sa in subagents.items():
+                sa_id = sa_name.lower()
+                sa_tools = list(getattr(sa, "tools", {}))
+                sa_tool_info = f"<br/>Tool: {sa_tools[0]}" if sa_tools else ""
+                lines.append(f'        {sa_id}["{sa_name}{sa_tool_info}"]')
+                subagent_links.append((name, sa_id, f"delegate_to_{sa_name.lower()}"))
+            lines.append("    end")
+        else:
+            agent_tools = [
+                t
+                for t in getattr(target, "tools", {})
+                if not t.startswith("delegate_to_")
+            ]
+            domain_tools = [
+                t for t in agent_tools if not t.startswith(("list_", "get_"))
+            ] or agent_tools
+            tool_info = f"<br/>Tool: {domain_tools[0]}" if domain_tools else ""
+            lines.append(f'    {name}["Agent: {target.name}{desc}{tool_info}"]')
+    elif callable(target):
+        fn_name = getattr(target, "__name__", str(target))
+        lines.append(f'    {name}["{name} (fn: {fn_name}){desc}"]')
+    return lines
+
+
 class CompiledStateGraph:
     """Immutable execution engine compiled from StateGraph."""
 
@@ -868,15 +1067,13 @@ class CompiledStateGraph:
         entry = self.graph.entry_point
         lines.append(f"    __start__([Start]) --> {entry}")
 
+        subagent_links: list[tuple[str, str, str]] = []
+
         for name, target in self.graph.nodes.items():
-            if isinstance(target, list):
-                names = ", ".join(a.name for a in target)
-                lines.append(f'    {name}["Parallel: [{names}]"]')
-            elif isinstance(target, Agent):
-                lines.append(f'    {name}["Agent: {target.name}"]')
-            elif callable(target):
-                fn_name = getattr(target, "__name__", str(target))
-                lines.append(f'    {name}["{name} (fn: {fn_name})"]')
+            lines.extend(_format_node_mermaid(name, target, subagent_links))
+
+        for src, sa_id, call_name in subagent_links:
+            lines.append(f"    {src} -.->|{call_name}| {sa_id}")
 
         for src, dst in self.graph.edges.items():
             dst_lbl = "__end__([End])" if dst == END else dst
@@ -886,7 +1083,8 @@ class CompiledStateGraph:
             if route_map:
                 for cond, dst in route_map.items():
                     dst_lbl = "__end__([End])" if dst == END else dst
-                    lines.append(f"    {src} -.->|{cond}| {dst_lbl}")
+                    lbl = _MERMAID_EDGE_LABELS.get((src, dst), cond)
+                    lines.append(f"    {src} -.->|{lbl}| {dst_lbl}")
             else:
                 lines.append(f"    {src} -.-> __end__([End])")
 
@@ -904,12 +1102,38 @@ class CompiledStateGraph:
         chart = self.to_mermaid()
         try:
             import base64
+            import urllib.request
 
             from IPython.display import Image, Markdown, display
 
             if as_image:
-                b64 = base64.b64encode(chart.encode("utf-8")).decode("ascii")
-                display(Image(url=f"https://mermaid.ink/img/{b64}"))
+                img_data: bytes | None = None
+                try:
+                    req = urllib.request.Request(
+                        "https://kroki.io/mermaid/png",
+                        data=chart.encode("utf-8"),
+                        headers={
+                            "Content-Type": "text/plain; charset=utf-8",
+                            "User-Agent": "Mozilla/5.0",
+                        },
+                    )
+                    with urllib.request.urlopen(req, timeout=12) as resp:  # noqa: S310
+                        img_data = resp.read()
+                except (urllib.error.URLError, TimeoutError, OSError):
+                    b64 = base64.b64encode(chart.encode("utf-8")).decode("ascii")
+                    url = f"https://mermaid.ink/img/{b64}"
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with (
+                        contextlib.suppress(urllib.error.URLError, TimeoutError, OSError),
+                        urllib.request.urlopen(req, timeout=8) as resp,  # noqa: S310
+                    ):
+                        img_data = resp.read()
+
+                if img_data:
+                    display(Image(data=img_data))
+                else:
+                    b64 = base64.b64encode(chart.encode("utf-8")).decode("ascii")
+                    display(Image(url=f"https://mermaid.ink/img/{b64}"))
             else:
                 display(Markdown(f"```mermaid\n{chart}\n```"))
         except Exception:  # noqa: BLE001 - no IPython / display: fall back to the log
@@ -970,6 +1194,37 @@ class CompiledStateGraph:
 
         return "\n\n".join(prompt_parts)
 
+    def _harvest_subagent_tools(self, subagent: Agent, sa_name: str, state: GraphState) -> None:
+        """Harvest observations and findings from an orchestrator's delegated subagent."""
+        last_resp = getattr(subagent, "last_response", None)
+        if last_resp is not None:
+            if sa_name not in state.agents and last_resp.content:
+                state.agents[sa_name] = last_resp.content
+            self._harvest_agent_tools(subagent, last_resp, state)
+            return
+
+        if subagent.messages and len(subagent.messages) > 1:
+            last_asst_msg = next(
+                (
+                    m.get("content")
+                    for m in reversed(subagent.messages)
+                    if isinstance(m, dict) and m.get("role") == "assistant" and m.get("content")
+                ),
+                None,
+            )
+            if last_asst_msg and sa_name not in state.agents:
+                state.agents[sa_name] = last_asst_msg
+
+            if sa_name not in state.tools:
+                state.tools[sa_name] = {}
+            for m in subagent.messages:
+                if isinstance(m, dict) and m.get("role") == "tool":
+                    c = m.get("content")
+                    if isinstance(c, str):
+                        with contextlib.suppress(json.JSONDecodeError, TypeError):
+                            c = json.loads(c)
+                    store_tool_result(state.tools[sa_name], "data", c)
+
     def _harvest_agent_tools(self, agent: Agent, resp: AgentResponse, state: GraphState) -> None:
         """Harvests observations from agent traces and updates state.tools."""
         if agent.name not in state.tools:
@@ -984,6 +1239,11 @@ class CompiledStateGraph:
                         val = json.loads(val)
                 store_tool_result(state.tools[agent.name], tool_name, val)
 
+        # If agent is an Orchestrator with subagents, harvest subagent tools and content
+        if hasattr(agent, "subagents") and isinstance(agent.subagents, dict):
+            for sa_name, subagent in agent.subagents.items():
+                self._harvest_subagent_tools(subagent, sa_name, state)
+
     def _execute_parallel_node(
         self,
         agents: list[Agent],
@@ -993,12 +1253,14 @@ class CompiledStateGraph:
         start_time: str,
     ) -> None:
         """Run a group of independent agents (sequentially) as one workflow node."""
+        active_agents = agents
+
         if self.verbose:
-            names = ", ".join(a.name for a in agents)
+            names = ", ".join(a.name for a in active_agents)
             logger.info(">> STEP %s | NODE: %s [PARALLEL: %s]", step_count, node_name, names)
 
         tools_called = set()
-        for agent in agents:
+        for agent in active_agents:
             p = self._build_agent_prompt(agent, state)
             resp = agent.run(p)
             state.agents[agent.name] = resp.content
@@ -1025,19 +1287,45 @@ class CompiledStateGraph:
                             )
                 logger.info("      - Output : %s", _compact_text(resp.content, 120))
 
+        active_names = [a.name for a in active_agents]
+        summary = f"Executed {len(active_agents)} parallel specialists: {active_names}"
+
         state.trajectory.append(
             {
                 "step": step_count,
                 "timestamp": start_time,
                 "node": node_name,
                 "type": "parallel",
-                "agents": [a.name for a in agents],
+                "agents": [a.name for a in active_agents],
                 "tools": sorted(tools_called),
-                "summary": (
-                    f"Executed {len(agents)} parallel specialists: {[a.name for a in agents]}"
-                ),
+                "summary": summary,
             }
         )
+
+    def _extract_subagent_delegations(
+        self, agent: Agent, tools_called: list[str]
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """Collects called subagents and their executed tools from an orchestrator."""
+        subagents_called: list[str] = []
+        delegations: dict[str, list[str]] = {}
+        if hasattr(agent, "subagents") and isinstance(agent.subagents, dict):
+            for sa_name, subagent in agent.subagents.items():
+                last_resp = getattr(subagent, "last_response", None)
+                if last_resp is not None:
+                    subagents_called.append(sa_name)
+                    sa_tools = [
+                        t
+                        for t in subagent.tools
+                        if any(
+                            step.step_type == "tool_call" and step.content.get("tool") == t
+                            for step in last_resp.trace
+                        )
+                    ]
+                    delegations[sa_name] = sa_tools
+                    for t in sa_tools:
+                        if t not in tools_called:
+                            tools_called.append(t)
+        return subagents_called, delegations
 
     def _execute_agent_node(
         self,
@@ -1061,6 +1349,7 @@ class CompiledStateGraph:
                 for step in resp.trace
             )
         ]
+        subagents_called, delegations = self._extract_subagent_delegations(agent, tools_called)
         activities = _extract_tool_activity(resp.trace)
 
         if self.verbose:
@@ -1075,18 +1364,22 @@ class CompiledStateGraph:
                         logger.info("    [OBSERVATION]  %s", _compact_text(act["observation"], 90))
             logger.info("  - Output  : %s", _compact_text(resp.content, 120))
 
-        state.trajectory.append(
-            {
-                "step": step_count,
-                "timestamp": start_time,
-                "node": node_name,
-                "type": "agent",
-                "executor": agent.name,
-                "tools": tools_called,
-                "output": resp.content,
-                "summary": _compact_text(resp.content, 80),
-            }
-        )
+        step_entry: dict[str, Any] = {
+            "step": step_count,
+            "timestamp": start_time,
+            "node": node_name,
+            "type": "agent",
+            "executor": agent.name,
+            "tools": tools_called,
+            "output": resp.content,
+            "summary": _compact_text(resp.content, 80),
+        }
+        if subagents_called:
+            step_entry["subagents"] = subagents_called
+            step_entry["delegations"] = delegations
+        if activities:
+            step_entry["activities"] = activities
+        state.trajectory.append(step_entry)
 
     def _execute_function_node(
         self,

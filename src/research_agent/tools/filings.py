@@ -177,7 +177,7 @@ def _fetch_filing_text(cik: str, filing: dict[str, Any]) -> str:
 
 def _chunk_text(text: str) -> list[str]:
     """Split text into overlapping, size-bounded chunks, capped at ``_MAX_CHUNKS``."""
-    chunks = []
+    chunks: list[str] = []
     start = 0
     length = len(text)
     while start < length and len(chunks) < _MAX_CHUNKS:

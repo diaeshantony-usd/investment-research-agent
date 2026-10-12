@@ -258,7 +258,10 @@ def _tickers_html(threads: Sequence[Mapping[str, Any]]) -> str:
     if not tickers:
         return ""
     tags = "".join(f'<span class="tag tag-sage">{html.escape(t)}</span>' for t in tickers[:12])
-    return f'<div class="tickers"><div class="rail-label">Researched</div><div class="tickers-row">{tags}</div></div>'
+    return (
+        f'<div class="tickers"><div class="rail-label">Researched</div>'
+        f'<div class="tickers-row">{tags}</div></div>'
+    )
 
 
 def _header_html(session: Any) -> str:
@@ -416,7 +419,13 @@ def build_app() -> gr.Blocks:
 
                 with gr.Row(elem_id="suggestions"):
                     sugg_btns = [
-                        gr.Button(p, size="sm", variant="secondary", scale=0, elem_classes="suggestion")
+                        gr.Button(
+                            p,
+                            size="sm",
+                            variant="secondary",
+                            scale=0,
+                            elem_classes="suggestion",
+                        )
                         for p in STARTER_PROMPTS
                     ]
 

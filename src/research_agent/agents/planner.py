@@ -11,6 +11,7 @@ from typing import Any
 
 from research_agent.agent_framework import Agent, Tool
 from research_agent.interfaces.llm import LLM
+from research_agent.tools.yahoo_finance import lookup_ticker
 
 PLANNER_ROLE = (
     "You are the Lead Investment Strategist and Query Dispatcher on an institutional equity "
@@ -28,13 +29,24 @@ PLANNER_ROLE = (
     "2. Company Inquiries (e.g. 'tesla', 'how is tesla?', 'NVDA', 'tell me about Apple'):\n"
     "Whenever ANY company, stock, or ticker is requested:\n"
     "- If verified research is NOT in 'root_memory' ('entity_store') or 'prior_research_context':\n"
-    "  You MUST ALWAYS dispatch immediately to specialists:\n"
-    "  'RESEARCH_REQUIRED: [Ticker] - [Key focus areas]'\n"
+    "  You MUST FIRST execute the 'lookup_ticker' tool with the company name or symbol to verify "
+    "it on Yahoo Finance.\n"
+    "  After receiving the tool observation, dispatch to the research workflow by "
+    "outputting a JSON object strictly formatted as:\n"
+    "  {\n"
+    '    "research_required": true,\n'
+    '    "ticker": "<TICKER>"\n'
+    "  }\n"
+    "  where <TICKER> is the verified ticker returned by 'lookup_ticker'.\n"
     "  DO NOT attempt to write a research brief, quote prices, or summarize the stock yourself!\n\n"
     "3. Forced Refresh / Live Data Requests:\n"
     "If the user explicitly asks for new data, fresh data, latest figures, an update/refresh, "
-    "or if 'force_refresh' is true in Current Context, you MUST trigger live research:\n"
-    "'RESEARCH_REQUIRED: [Ticker] - Live data refresh and updated metrics requested'\n\n"
+    "or if 'force_refresh' is true in Current Context, verify via 'lookup_ticker' "
+    "and trigger live research via JSON:\n"
+    "  {\n"
+    '    "research_required": true,\n'
+    '    "ticker": "<TICKER>"\n'
+    "  }\n\n"
     "4. Researched Company In-Memory Recall & Follow-ups:\n"
     "If the company is already researched and 'prior_research_context' or "
     "root_memory['entity_store'] contains its data, AND the user is NOT asking for a live data "
@@ -81,24 +93,27 @@ def planner_agent(
 ) -> Agent:
     """Create the Planner agent (graph entry point).
 
-    It answers general finance questions directly. For company research it replies
-    ``RESEARCH_REQUIRED: <ticker> - <focus areas>``, which routes the graph to the
-    specialist analysts.
+    Answers general finance questions directly. For company research it uses its built-in
+    ``lookup_ticker`` tool to verify the ticker on Yahoo Finance, then emits structured JSON.
 
     Args:
         model: Model name, or an ``LLM`` client to use directly.
         llm: LLM client shared with the rest of the graph.
-        tools: Tools the planner may call (the graph passes memory tools).
+        tools: Optional extra tools (e.g. memory retrieval tools passed by the workflow graph).
         verbose: Log every thought, tool call and observation.
 
     Returns:
         A configured ``Agent`` named ``ResearchPlanner``.
     """
+    planner_tools: list[Tool | Callable[..., Any]] = [lookup_ticker]
+    if tools:
+        planner_tools.extend(tools)
+
     return Agent(
         name="ResearchPlanner",
         role=PLANNER_ROLE,
         model=model,
         llm=llm,
-        tools=tools,
+        tools=planner_tools,
         verbose=verbose,
     )

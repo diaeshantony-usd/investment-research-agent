@@ -17,6 +17,7 @@ from research_agent.agent_framework import (
     END,
     Agent,
     GraphState,
+    OrchestratorAgent,
     StateGraph,
     Tool,
     display_trajectory,
@@ -123,6 +124,59 @@ class TestAgentFramework:
         assert "tool_call" in trace_types
         assert "tool_result" in trace_types
         assert "final_answer" in trace_types
+
+    def test_agent_as_tool(self):
+        llm = MockFrameworkLLM(responses=[("Subagent analysis result", [])])
+        sub = Agent(name="EarningsSpecialist", role="Examines 10-K filings", llm=llm)
+        tool_obj = sub.as_tool()
+
+        assert tool_obj.name == "delegate_to_earningsspecialist"
+        assert "Examines 10-K filings" in tool_obj.description
+        res = tool_obj.execute(task_description="Check Q2 revenue")
+        assert res == "Subagent analysis result"
+
+        custom_tool = sub.as_tool(name="ask_specialist")
+        assert custom_tool.name == "ask_specialist"
+
+    def test_orchestrator_agent(self):
+        sub1_llm = MockFrameworkLLM(responses=[("Sub1 fundamental report", [])])
+        sub1 = Agent(name="FundAnalyst", role="Analyzes fundamentals", llm=sub1_llm)
+
+        sub2_llm = MockFrameworkLLM(responses=[("Sub2 news digest", [])])
+        sub2 = Agent(name="NewsAnalyst", role="Scrapes news catalysts", llm=sub2_llm)
+
+        orch_llm = MockFrameworkLLM(
+            responses=[
+                (
+                    "Calling specialist...",
+                    [
+                        {
+                            "name": "delegate_to_fundanalyst",
+                            "args": {"task_description": "Analyze margins"},
+                        }
+                    ],
+                ),
+                ("Final synthesis incorporating fundamentals.", []),
+            ]
+        )
+
+        orchestrator = OrchestratorAgent(
+            name="LeadSupervisor",
+            subagents=[sub1],
+            llm=orch_llm,
+        )
+
+        assert "FundAnalyst" in orchestrator.subagents
+        assert "delegate_to_fundanalyst" in orchestrator.tools
+
+        # Dynamic subagent addition
+        orchestrator.add_subagent(sub2)
+        assert "NewsAnalyst" in orchestrator.subagents
+        assert "delegate_to_newsanalyst" in orchestrator.tools
+
+        resp = orchestrator.run("Perform research on NVDA")
+        assert "Final synthesis" in resp.content
+        assert any(step.step_type == "tool_call" for step in resp.trace)
 
     def test_graph_state_schema(self):
         state = GraphState(
@@ -272,6 +326,7 @@ class TestAgentFramework:
         assert "DATA AVAILABILITY GATE" in DRAFT_WRITER_ROLE
         assert "Data Unavailable" in DRAFT_WRITER_ROLE
         assert "MUST NOT issue an investment stance" in DRAFT_WRITER_ROLE
+        assert "What to do next" in DRAFT_WRITER_ROLE
 
     def test_workflow_data_unavailable_passes_critic(self, monkeypatch):
         from research_agent.agent_framework import GraphMemory
@@ -283,8 +338,28 @@ class TestAgentFramework:
         llm = MockFrameworkLLM(
             responses=[
                 ("RESEARCH_REQUIRED: TSLA - evaluate", []),  # Planner
+                (
+                    "Delegating to EarningsAnalyst...",
+                    [
+                        {
+                            "name": "delegate_to_earningsanalyst",
+                            "args": {"task_description": "Analyze TSLA earnings"},
+                        }
+                    ],
+                ),  # Orchestrator turn 1
                 ("No earnings data for TSLA", []),  # EarningsAnalyst
+                (
+                    "Delegating to MarketAnalyst...",
+                    [
+                        {
+                            "name": "delegate_to_marketanalyst",
+                            "args": {"task_description": "Analyze TSLA market technicals"},
+                        }
+                    ],
+                ),  # Orchestrator turn 2
                 ("No market technicals for TSLA", []),  # MarketAnalyst
+                # Orchestrator turn 3
+                ("No coverage data available for TSLA across specialists.", []),
                 # NewsAnalyst: the prompt chain finds no articles, so it makes no LLM call.
                 ("# Research Brief: TSLA - Coverage Unavailable", []),  # DraftWriter
                 # Critic: a data-unavailable notice passes without an LLM call.
@@ -296,7 +371,7 @@ class TestAgentFramework:
 
         executed_nodes = [s["node"] for s in state.trajectory]
         assert "planner" in executed_nodes
-        assert "specialists" in executed_nodes
+        assert "orchestrator" in executed_nodes
         assert "draft_writer" in executed_nodes
         assert "critic" in executed_nodes
         assert "refiner" not in executed_nodes
@@ -309,20 +384,39 @@ class TestAgentFramework:
 
         _stub_no_news(monkeypatch)
 
-        # Specialists invoke real tools for TSLA which return no data / errors
+        # Specialists invoke real tools for TSLA which return no data / errors via orchestrator
         llm = MockFrameworkLLM(
             responses=[
                 ("RESEARCH_REQUIRED: TSLA - evaluate", []),  # Planner
+                (
+                    "Delegating to EarningsAnalyst...",
+                    [
+                        {
+                            "name": "delegate_to_earningsanalyst",
+                            "args": {"task_description": "Analyze TSLA earnings"},
+                        }
+                    ],
+                ),  # Orchestrator turn 1
                 (
                     "Checking earnings...",
                     [{"name": "get_earnings_data", "args": {"ticker": "TSLA"}}],
                 ),
                 ("No earnings found for TSLA.", []),
                 (
+                    "Delegating to MarketAnalyst...",
+                    [
+                        {
+                            "name": "delegate_to_marketanalyst",
+                            "args": {"task_description": "Analyze TSLA technicals"},
+                        }
+                    ],
+                ),  # Orchestrator turn 2
+                (
                     "Checking market...",
                     [{"name": "get_market_technicals", "args": {"ticker": "TSLA"}}],
                 ),
                 ("No technicals found for TSLA.", []),
+                ("Specialists reported no data available for TSLA.", []),  # Orchestrator turn 3
                 # NewsAnalyst: the prompt chain calls get_news_data itself and, with no
                 # articles, makes no LLM call.
                 ("# Research Brief: TSLA - Data Unavailable", []),  # DraftWriter
@@ -335,8 +429,91 @@ class TestAgentFramework:
 
         executed_nodes = [s["node"] for s in state.trajectory]
         assert "planner" in executed_nodes
-        assert "specialists" in executed_nodes
+        assert "orchestrator" in executed_nodes
         assert "draft_writer" in executed_nodes
         assert "critic" in executed_nodes
         assert "refiner" not in executed_nodes
         assert "Data Unavailable" in state.output
+
+    def test_agent_response_typing_and_json_parsing(self):
+        import json
+
+        # Case 1: Agent returns valid JSON
+        json_payload = {"research_required": True, "ticker": "NVDA", "focus_areas": ["earnings"]}
+        llm_json = MockFrameworkLLM(responses=[(json.dumps(json_payload), [])])
+        agent_json = Agent(name="JsonAgent", llm=llm_json)
+        resp_json = agent_json.run("Evaluate NVDA")
+
+        assert resp_json.response_type == "json"
+        assert isinstance(resp_json.content, dict)
+        assert resp_json.content["ticker"] == "NVDA"
+        assert resp_json.data == json_payload
+        assert '"research_required": true' in str(resp_json)
+
+        # Case 2: Agent returns plain text
+        llm_text = MockFrameworkLLM(responses=[("Operating margin is 45%.", [])])
+        agent_text = Agent(name="TextAgent", llm=llm_text)
+        resp_text = agent_text.run("What is operating margin?")
+
+        assert resp_text.response_type == "text"
+        assert isinstance(resp_text.content, str)
+        assert resp_text.content == "Operating margin is 45%."
+        assert resp_text.data is None
+
+    def test_workflow_planner_json_dispatch(self, monkeypatch):
+        import json
+
+        from research_agent.agent_framework import GraphMemory
+        from research_agent.workflows.graph import build_research_workflow
+
+        _stub_no_news(monkeypatch)
+
+        # 1. Planner returns JSON dispatch without focus_areas
+        planner_json = json.dumps({"research_required": True, "ticker": "TSLA"})
+        llm = MockFrameworkLLM(
+            responses=[
+                (planner_json, []),  # Planner
+                (
+                    "Delegating to EarningsAnalyst...",
+                    [
+                        {
+                            "name": "delegate_to_earningsanalyst",
+                            "args": {"task_description": "Analyze TSLA earnings"},
+                        }
+                    ],
+                ),  # Orchestrator turn 1
+                (
+                    "Checking earnings...",
+                    [{"name": "get_earnings_data", "args": {"ticker": "TSLA"}}],
+                ),  # EarningsAnalyst
+                ("No earnings found for TSLA.", []),
+                ("Earnings research concluded.", []),  # Orchestrator turn 2
+                ("# Research Brief: TSLA - Data Unavailable", []),  # DraftWriter
+            ]
+        )
+        mem = GraphMemory()
+        app = build_research_workflow(llm=llm, memory=mem)
+        state = app.invoke({"question": "Analyze TSLA earnings"})
+
+        executed_nodes = [s["node"] for s in state.trajectory]
+        assert "planner" in executed_nodes
+        assert "orchestrator" in executed_nodes
+        assert executed_nodes[-1] == "release"
+        orch_step = next(s for s in state.trajectory if s["node"] == "orchestrator")
+        assert "delegate_to_earningsanalyst" in orch_step["tools"]
+        assert "EarningsAnalyst" in state.agents
+
+    def test_workflow_planner_direct_text_short_circuits_to_end(self):
+        from research_agent.agent_framework import GraphMemory
+        from research_agent.workflows.graph import build_research_workflow
+
+        # Planner answers directly with plain text (Flow 2)
+        concept_answer = "Operating margin is the ratio of operating income to revenue."
+        llm = MockFrameworkLLM(responses=[(concept_answer, [])])
+        mem = GraphMemory()
+        app = build_research_workflow(llm=llm, memory=mem)
+        state = app.invoke({"question": "What is operating margin?"})
+
+        executed_nodes = [s["node"] for s in state.trajectory]
+        assert executed_nodes == ["planner"]
+        assert state.output == concept_answer

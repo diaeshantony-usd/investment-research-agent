@@ -98,7 +98,7 @@ def cached(prefix: str, ttl_seconds: float = DEFAULT_TTL_SECONDS) -> Callable:
 
             entry = _read(key)
             is_fresh = entry is not None and (time.time() - entry["cached_at"]) <= ttl_seconds
-            if is_fresh and not force_refresh:
+            if entry is not None and is_fresh and not force_refresh:
                 logger.info("Cache hit for %s", key)
                 return entry["value"]
 

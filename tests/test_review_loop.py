@@ -467,9 +467,28 @@ def test_research_graph_runs_the_review_loop(monkeypatch):
     llm = ScriptedLLM(
         [
             "RESEARCH_REQUIRED: NVDA - evaluate",  # Planner
+            (
+                "Delegating to earnings...",
+                [
+                    {
+                        "name": "delegate_to_earningsanalyst",
+                        "args": {"task_description": "Analyze NVDA earnings"},
+                    }
+                ],
+            ),  # Orchestrator turn 1
             ("Fetching", [{"name": "get_earnings_data", "args": {"ticker": "NVDA"}}]),
             "Revenue $38.2B.",  # EarningsAnalyst
-            "No technicals.",  # MarketAnalyst (NewsAnalyst makes no call without articles)
+            (
+                "Delegating to market...",
+                [
+                    {
+                        "name": "delegate_to_marketanalyst",
+                        "args": {"task_description": "Analyze NVDA technicals"},
+                    }
+                ],
+            ),  # Orchestrator turn 2
+            "No technicals.",  # MarketAnalyst
+            "Synthesized findings: Revenue $38.2B, no technicals.",  # Orchestrator turn 3
             invented,  # DraftWriter
             judge_reply(9),  # Critic, round 0: blocked by "$155"
             grounded + "\n### Change Log\n- removed the price target",  # Refiner
