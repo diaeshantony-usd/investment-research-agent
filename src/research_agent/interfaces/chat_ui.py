@@ -58,19 +58,46 @@ ChatHistory = list[dict[str, Any]]
 # --------------------------------------------------------------------------- theme
 
 _ACCENT = gr.themes.Color(
-    c50="#fff2eb", c100="#ffe1d0", c200="#ffc6a5", c300="#f6a06b", c400="#d67f48",
-    c500="#c67139", c600="#b2622d", c700="#8c491a", c800="#643312", c900="#402310",
-    c950="#2b170a", name="terracotta",
+    c50="#fff2eb",
+    c100="#ffe1d0",
+    c200="#ffc6a5",
+    c300="#f6a06b",
+    c400="#d67f48",
+    c500="#c67139",
+    c600="#b2622d",
+    c700="#8c491a",
+    c800="#643312",
+    c900="#402310",
+    c950="#2b170a",
+    name="terracotta",
 )
 _SAGE = gr.themes.Color(
-    c50="#f0fae1", c100="#e1eecc", c200="#ccdbb2", c300="#aebf92", c400="#8fa073",
-    c500="#7a8a5e", c600="#728157", c700="#56633f", c800="#3d472b", c900="#272e1b",
-    c950="#1a1f12", name="sage",
+    c50="#f0fae1",
+    c100="#e1eecc",
+    c200="#ccdbb2",
+    c300="#aebf92",
+    c400="#8fa073",
+    c500="#7a8a5e",
+    c600="#728157",
+    c700="#56633f",
+    c800="#3d472b",
+    c900="#272e1b",
+    c950="#1a1f12",
+    name="sage",
 )
 _SAND = gr.themes.Color(
-    c50="#f9f4ed", c100="#eee7db", c200="#dcd3c4", c300="#c0b6a5", c400="#a19786",
-    c500="#82796a", c600="#645c50", c700="#474238", c800="#2e2b25", c900="#201e1d",
-    c950="#141312", name="sand",
+    c50="#f9f4ed",
+    c100="#eee7db",
+    c200="#dcd3c4",
+    c300="#c0b6a5",
+    c400="#a19786",
+    c500="#82796a",
+    c600="#645c50",
+    c700="#474238",
+    c800="#2e2b25",
+    c900="#201e1d",
+    c950="#141312",
+    name="sand",
 )
 
 
@@ -387,9 +414,7 @@ def build_app() -> gr.Blocks:
                 gr.HTML(BRAND_HTML)
                 new_btn = gr.Button("New research", variant="primary", elem_classes="pill")
                 gr.HTML('<div class="rail-label">Threads</div>')
-                threads = gr.Radio(
-                    choices=[], show_label=False, container=False, elem_id="threads"
-                )
+                threads = gr.Radio(choices=[], show_label=False, container=False, elem_id="threads")
                 with gr.Accordion("Resume by thread id", open=False, elem_id="resume"):
                     thread_box = gr.Textbox(
                         show_label=False, placeholder="e.g. gradio-1a2b3c4d", container=False
@@ -453,9 +478,9 @@ def build_app() -> gr.Blocks:
         ).then(refresh, inputs=[session_state], outputs=refresh_outputs)
 
         for btn in sugg_btns:
-            btn.click(
-                respond, inputs=[btn, chatbot, session_state], outputs=turn_outputs
-            ).then(refresh, inputs=[session_state], outputs=refresh_outputs)
+            btn.click(respond, inputs=[btn, chatbot, session_state], outputs=turn_outputs).then(
+                refresh, inputs=[session_state], outputs=refresh_outputs
+            )
 
         resume_btn.click(start_session, inputs=[thread_box], outputs=session_outputs).then(
             refresh, inputs=[session_state], outputs=refresh_outputs

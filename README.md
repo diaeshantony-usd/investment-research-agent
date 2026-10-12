@@ -163,7 +163,7 @@ from research_agent import ResearchSession
 
 s = ResearchSession("nvda-01")
 s.ask("Analyse NVDA")
-s.ask("How do its margins compare?")   # follow-up in the same session
+s.ask("How do its margins compare?")  # follow-up in the same session
 ```
 
 ```bash

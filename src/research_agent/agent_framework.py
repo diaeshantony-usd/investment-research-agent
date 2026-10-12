@@ -1038,9 +1038,7 @@ def _format_node_mermaid(
             lines.append("    end")
         else:
             agent_tools = [
-                t
-                for t in getattr(target, "tools", {})
-                if not t.startswith("delegate_to_")
+                t for t in getattr(target, "tools", {}) if not t.startswith("delegate_to_")
             ]
             domain_tools = [
                 t for t in agent_tools if not t.startswith(("list_", "get_"))
