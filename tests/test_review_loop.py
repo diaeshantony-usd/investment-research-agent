@@ -427,6 +427,18 @@ class TestReviewLoop:
         assert "$14.5B" in state.output
 
 
+def test_long_filings_do_not_push_other_tools_out_of_the_prompt():
+    # Found live: SEC passages filled the judge's evidence, so it claimed the news
+    # sources it cited were "not part of the retrieved data".
+    tools = {
+        "EarningsAnalyst": {"search_sec_filings": {"passages": [{"text": "risk " * 5000}]}},
+        "NewsAnalyst": {"get_news_data": {"articles": [{"source": "The Verge"}]}},
+    }
+    text = review_loop._compact_evidence(tools)
+    assert "The Verge" in text
+    assert len(text) <= review_loop._EVIDENCE_PROMPT_CHARS
+
+
 def test_repeated_tool_calls_are_all_kept_as_evidence():
     # Found live: a 10-Q search overwrote the earlier 10-K search, losing the segment table.
     store: dict[str, Any] = {}

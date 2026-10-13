@@ -91,8 +91,11 @@ REQUIRED_SECTIONS: Final = {
 # Markers of the Draft writer's "no data for this ticker" notice, which needs no review.
 _UNAVAILABLE_MARKERS: Final = ("DATA UNAVAILABLE", "COVERAGE UNAVAILABLE")
 
-# Evidence passed to the LLM prompts is capped to keep them small.
-_EVIDENCE_PROMPT_CHARS: Final = 9000
+# Evidence passed to the LLM prompts is capped to keep them small. Long text fields
+# (filing passages, article summaries) are shortened first, so one long filing cannot
+# push the other tools' data out of the prompt.
+_EVIDENCE_PROMPT_CHARS: Final = 12000
+_EVIDENCE_TEXT_CHARS: Final = 300
 
 # ---------------------------------------------------------------------------
 # Number grounding (code check)
@@ -770,8 +773,28 @@ def _split_change_log(text: str) -> tuple[str, list[str]]:
     return brief, log
 
 
+def _shorten(value: Any) -> Any:
+    """Copy of ``value`` with every long string cut to ``_EVIDENCE_TEXT_CHARS``."""
+    if isinstance(value, Mapping):
+        return {key: _shorten(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_shorten(item) for item in value]
+    if isinstance(value, str):
+        parsed = _maybe_json(value)
+        if parsed is not None:
+            return _shorten(parsed)
+        if len(value) > _EVIDENCE_TEXT_CHARS:
+            return value[:_EVIDENCE_TEXT_CHARS] + "..."
+    return value
+
+
 def _compact_evidence(tools: Mapping[str, Any]) -> str:
-    text = json.dumps(tools, default=str, separators=(",", ":"))
+    """The retrieved data as compact JSON for the judge and Refiner prompts.
+
+    Long passages are shortened before the overall cap is applied, so every tool's
+    results (including the news headlines and sources) stay visible to the LLM.
+    """
+    text = json.dumps(_shorten(tools), default=str, separators=(",", ":"))
     return text[:_EVIDENCE_PROMPT_CHARS]
 
 
