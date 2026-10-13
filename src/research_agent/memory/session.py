@@ -42,6 +42,7 @@ from typing import Any, Final, Protocol
 
 from research_agent.agent_framework import GraphMemory, GraphState
 from research_agent.config import DEFAULT_MEMORY_FILE, logger
+from research_agent.memory.long_term import LongTermMemory
 from research_agent.memory.session_store import SessionStore
 from research_agent.memory.tickers import (
     extract_tickers,
@@ -213,6 +214,7 @@ class ResearchSession:
         llm: Any = None,
         memory: GraphMemory | None = None,
         store: SessionStore | None = None,
+        long_term: LongTermMemory | None = None,
         workflow: Workflow | None = None,
         workflow_builder: WorkflowBuilder | None = None,
         recent_turns: int = 6,
@@ -231,6 +233,9 @@ class ResearchSession:
 
         self.thread_id = thread_id
         self.store = store if store is not None else SessionStore()
+        # Long-term memory (F4) is shared by every thread: it is what the system has
+        # learned across runs, not what this conversation said.
+        self.long_term = long_term if long_term is not None else LongTermMemory()
         self.memory = (
             memory if memory is not None else GraphMemory(filepath=str(DEFAULT_MEMORY_FILE))
         )
@@ -421,6 +426,8 @@ class ResearchSession:
                         effective_ticker = planned_ticker
                         self.store.update_thread(self.thread_id, active_ticker=planned_ticker)
 
+        self._learn_from_run(effective_ticker, resolution.question, state)
+
         # Cache full briefs per ticker so follow-up questions can reuse them.
         if effective_ticker and _produced_brief(state):
             self.store.cache_put(
@@ -561,7 +568,32 @@ class ResearchSession:
 
         if ticker:
             payload.update(self._prior_research(ticker))
+        # Notes and critic lessons from earlier runs; agents see them as context.
+        if learned := self.long_term.context_for(ticker):
+            payload["long_term_memory"] = learned
         return payload
+
+    def _learn_from_run(self, ticker: str | None, question: str, state: Any) -> None:
+        """Save the run's ticker note and Critic lessons to long-term memory (F4).
+
+        Best-effort: a memory write must never fail the user's turn.
+        """
+        review = getattr(state, "review", None)
+        if not ticker or not review or not _produced_brief(state):
+            return
+        try:
+            note = self.long_term.record_run(ticker, question, review, state.output or "")
+        except Exception:  # noqa: BLE001 - learning is optional, the answer is not
+            logger.exception("[session %s] could not update long-term memory", self.thread_id)
+            return
+        if note:
+            logger.info(
+                "[session %s] long-term memory: %s first draft %.1f, final %.1f",
+                self.thread_id,
+                ticker,
+                note["first_draft_score"] or 0.0,
+                note["final_score"] or 0.0,
+            )
 
     def _prior_research(self, ticker: str) -> dict[str, str]:
         """Return the cached brief for ``ticker`` as payload fields, or an empty dict."""

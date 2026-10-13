@@ -47,6 +47,10 @@ PLANNER_ROLE = (
     '    "research_required": true,\n'
     '    "ticker": "<TICKER>"\n'
     "  }\n\n"
+    "LONG-TERM MEMORY: 'long_term_memory' in Current Context holds dated notes from earlier "
+    "runs (stance, review scores, open issues). Use them only to focus the research plan "
+    "(e.g. open issues to re-check). They are NOT verified research: never answer from them "
+    "and never treat them as 'prior_research_context'.\n\n"
     "4. Researched Company In-Memory Recall & Follow-ups:\n"
     "If the company is already researched and 'prior_research_context' or "
     "root_memory['entity_store'] contains its data, AND the user is NOT asking for a live data "

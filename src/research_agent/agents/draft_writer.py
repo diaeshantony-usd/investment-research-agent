@@ -59,6 +59,9 @@ DRAFT_WRITER_ROLE = (
     "- A percentage you calculate (a margin, a share of revenue, the distance from a moving "
     "average) must be marked with '\u2248' and written on the same line as one of its inputs, "
     "e.g. 'Operating income $22.8B (\u224860% of revenue)'.\n"
+    "- If Current Context contains 'long_term_memory', apply its 'critic_lessons': they "
+    "list mistakes earlier drafts made. Its 'ticker_notes' are dated notes from past runs; "
+    "never copy figures from them.\n"
     "- NEVER use broad macroeconomic indicators as a pretext to fabricate company-specific "
     "catalysts or assign an investment stance when company data is missing."
 )

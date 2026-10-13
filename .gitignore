@@ -22,6 +22,7 @@ logs/
 
 # Runtime Memory & Cache (.json files)
 data/memory/*.json
+data/memory/long_term/
 data/cache/*.json
 *.sqlite
 *.sqlite-wal

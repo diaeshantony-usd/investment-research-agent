@@ -78,3 +78,11 @@ def _offline_yahoo_search(monkeypatch):
         raise ConnectionError("Yahoo Finance search disabled in tests")
 
     monkeypatch.setattr("research_agent.memory.tickers._yahoo_search", unreachable)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_long_term_memory(monkeypatch, tmp_path):
+    """Long-term memory writes go to a temporary folder in every test."""
+    monkeypatch.setattr(
+        "research_agent.memory.long_term.DEFAULT_LONG_TERM_DIR", tmp_path / "long_term"
+    )
