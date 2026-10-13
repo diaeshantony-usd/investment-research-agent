@@ -11,6 +11,8 @@ venv/
 .ruff_cache/
 .mypy_cache/
 *.egg-info/
+.coverage
+htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/

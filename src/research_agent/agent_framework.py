@@ -448,8 +448,8 @@ class Agent:
             self.messages.append({"role": "user", "content": prompt})
 
         if on_progress:
-            desc = self.description or self.name
-            on_progress(f"Thinking: {desc}...")
+            desc = self.description or "Analyzing and executing tasks"
+            on_progress(f"Agent: [{self.name}] {desc}...")
 
     def run(
         self,
@@ -1077,34 +1077,53 @@ def _format_node_mermaid(
 
 
 def _format_node_progress(node_name: str, node_target: Any = None) -> str:
-    """Generically formats a progress/thinking message from the node target metadata."""
+    """Generically formats an agent progress message from the node target metadata."""
+    name = ""
     if node_target is not None:
-        desc = getattr(node_target, "description", None)
-        if desc:
-            return f"Thinking: {desc}..."
         if isinstance(node_target, Agent):
-            return f"Thinking: [{node_target.name}] Analyzing and executing tasks..."
-        if isinstance(node_target, list):
-            names = [getattr(a, "name", str(a)) for a in node_target]
-            return f"Thinking: Running parallel specialists [{', '.join(names)}]..."
-        if callable(node_target):
-            doc = (inspect.getdoc(node_target) or "").strip().split("\n")[0]
-            if doc:
-                return f"Thinking: {doc}..."
-    return f"Thinking: Executing workflow node '{node_name}'..."
+            name = node_target.name
+        elif callable(node_target):
+            name = getattr(node_target, "__name__", node_name).replace("_node", "").capitalize()
+        elif isinstance(node_target, list):
+            name = ", ".join(getattr(a, "name", str(a)) for a in node_target)
+    if not name:
+        name = node_name.replace("_node", "").capitalize()
+
+    desc = getattr(node_target, "description", None) if node_target is not None else None
+    if not desc and callable(node_target):
+        doc = (inspect.getdoc(node_target) or "").strip().split("\n")[0]
+        if doc:
+            desc = doc
+    if not desc:
+        desc = f"Executing '{node_name}'"
+
+    return f"Agent: [{name}] {desc}..."
+
+
+def _format_args_preview(fn_args: dict[str, Any], max_len: int = 75) -> str:
+    """Formats runtime tool keyword arguments compactly with smart truncation."""
+    if not fn_args:
+        return ""
+    items = []
+    for k, v in fn_args.items():
+        if isinstance(v, str):
+            cleaned = " ".join(v.strip().split())
+            val_repr = f"'{cleaned}'" if len(cleaned) <= 35 else f"'{cleaned[:32]}...'"
+        else:
+            val_repr = repr(v)
+            if len(val_repr) > 35:
+                val_repr = val_repr[:32] + "..."
+        items.append(f"{k}={val_repr}")
+    full = ", ".join(items)
+    if len(full) > max_len:
+        return full[: max_len - 3] + "..."
+    return full
 
 
 def _format_tool_progress(agent: Agent, fn_name: str, fn_args: dict[str, Any]) -> str:
-    """Generically formats tool execution progress from tool and agent metadata."""
-    tool_obj = agent.tools.get(fn_name)
-    desc = getattr(tool_obj, "description", None) or ""
-    if desc:
-        summary = desc.strip().split(".")[0]
-        return f"Tool: [{agent.name}] {fn_name} - {summary}..."
-    args_preview = ", ".join(f"{k}={v!r}" for k, v in fn_args.items())
-    if len(args_preview) > 60:
-        args_preview = args_preview[:57] + "..."
-    return f"Tool: [{agent.name}] Calling {fn_name}({args_preview})..."
+    """Generically formats tool execution progress showing agent, tool name, and call arguments."""
+    args_preview = _format_args_preview(fn_args)
+    return f"Tool: [{agent.name}] {fn_name}({args_preview})"
 
 
 def _attach_tool_hooks(

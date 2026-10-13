@@ -210,8 +210,8 @@ class NewsChainAgent(Agent):
             trace records the tool call and every stage's intermediate result.
         """
         if on_progress:
-            desc = self.description or self.name
-            on_progress(f"Thinking: {desc}...")
+            desc = self.description or "Synthesizing recent news and sentiment"
+            on_progress(f"Agent: [{self.name}] {desc}...")
 
         trace: list[TraceStep] = []
         llm_calls = 0

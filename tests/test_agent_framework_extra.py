@@ -27,7 +27,10 @@ from research_agent.agent_framework import (
     Tool,
     TraceStep,
     _compact_text,
+    _format_args_preview,
+    _format_node_progress,
     _format_step_summary,
+    _format_tool_progress,
     display_trajectory,
     format_trajectory_markdown,
 )
@@ -635,3 +638,88 @@ class TestDisplayTrajectory:
         }
         result = display_trajectory(state, as_markdown=True)
         assert result.startswith("### Execution Trajectory Summary")
+
+
+# ===========================================================================
+# Progress Formatting and Argument Preview
+# ===========================================================================
+
+
+class TestProgressFormatting:
+    def test_format_node_progress_agent_with_desc(self):
+        ag = Agent(
+            name="TestAgent",
+            role="Role",
+            description="Analyzing data",
+            llm=ScriptedLLM([("ok", [])]),
+        )
+        msg = _format_node_progress("test_node", ag)
+        assert msg == "Agent: [TestAgent] Analyzing data..."
+
+    def test_format_node_progress_agent_without_desc(self):
+        ag = Agent(name="BareAgent", role="Role", llm=ScriptedLLM([("ok", [])]))
+        msg = _format_node_progress("bare_node", ag)
+        assert msg == "Agent: [BareAgent] Executing 'bare_node'..."
+
+    def test_format_node_progress_callable_with_desc(self):
+        def my_node(state):
+            return state
+
+        my_node.description = "Processing node"
+        msg = _format_node_progress("my_node", my_node)
+        assert msg == "Agent: [My] Processing node..."
+
+    def test_format_node_progress_callable_with_docstring(self):
+        def sample_node(state):
+            """Sample docstring summary."""
+            return state
+
+        msg = _format_node_progress("sample_node", sample_node)
+        assert msg == "Agent: [Sample] Sample docstring summary...."
+
+    def test_format_node_progress_parallel_list(self):
+        a1 = Agent(name="A1", role="r", llm=ScriptedLLM([("ok", [])]))
+        a2 = Agent(name="A2", role="r", llm=ScriptedLLM([("ok", [])]))
+        msg = _format_node_progress("parallel_node", [a1, a2])
+        assert msg == "Agent: [A1, A2] Executing 'parallel_node'..."
+
+    def test_format_args_preview(self):
+        assert _format_args_preview({}) == ""
+        assert _format_args_preview({"query": "TCS"}) == "query='TCS'"
+        assert _format_args_preview({"ticker": "AAPL", "limit": 5}) == "ticker='AAPL', limit=5"
+        long_val = "x" * 60
+        preview = _format_args_preview({"text": long_val})
+        assert "..." in preview
+
+    def test_format_tool_progress(self):
+        ag = Agent(name="ResearchPlanner", role="r", llm=ScriptedLLM([("ok", [])]))
+        msg = _format_tool_progress(ag, "lookup_ticker", {"query": "TCS"})
+        assert msg == "Tool: [ResearchPlanner] lookup_ticker(query='TCS')"
+
+    def test_live_progress_callback_flow(self):
+        progress_messages: list[str] = []
+        llm = ScriptedLLM(
+            [
+                ("Thinking", [{"name": "mock_tool", "args": {"symbol": "NVDA"}}]),
+                ("Done", []),
+            ]
+        )
+        ag = Agent(
+            name="WorkerAgent",
+            role="Worker",
+            description="Processing request",
+            llm=llm,
+            tools=[
+                Tool(
+                    name="mock_tool",
+                    description="Tool desc",
+                    func=lambda symbol: f"Found {symbol}",
+                )
+            ],
+        )
+
+        resp = ag.run("Run job", on_progress=progress_messages.append)
+        assert resp.content == "Done"
+        assert len(progress_messages) >= 2
+        assert progress_messages[0] == "Agent: [WorkerAgent] Processing request..."
+        assert progress_messages[1] == "Tool: [WorkerAgent] mock_tool(symbol='NVDA')"
