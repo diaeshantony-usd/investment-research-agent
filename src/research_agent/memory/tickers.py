@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import functools
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -206,6 +207,10 @@ class TickerResolution:
     suggestion: str | None = None
 
 
+# Yahoo exchange codes of over-the-counter markets (not exchange listings).
+_OTC_EXCHANGES: Final = frozenset({"PNK", "OQB", "OQX", "OEM", "OBB", "OTC", "OPR"})
+
+
 @functools.lru_cache(maxsize=512)
 def _yahoo_search(query: str, fuzzy: bool = False) -> tuple[dict[str, Any], ...]:
     """Yahoo Finance symbol search (the site's search box), cached per process.
@@ -225,14 +230,22 @@ def _yahoo_search(query: str, fuzzy: bool = False) -> tuple[dict[str, Any], ...]
         enable_fuzzy_query=fuzzy,
         raise_errors=True,
     )
-    return tuple(
+    quotes = [
         {
             "symbol": str(quote.get("symbol") or "").upper(),
             "name": quote.get("shortname") or quote.get("longname") or "",
             "type": quote.get("quoteType") or "",
+            "exchange": str(quote.get("exchange") or "").upper(),
         }
         for quote in search.quotes or []
-    )
+    ]
+    # US exchange listings first ("XOM" before "XOM.NE"): the system covers US equities.
+    return tuple(sorted(quotes, key=lambda q: not _is_us_listing(q)))
+
+
+def _is_us_listing(quote: Mapping[str, Any]) -> bool:
+    """True for a symbol listed on a US exchange (not a foreign or OTC listing)."""
+    return "." not in quote["symbol"] and quote.get("exchange", "") not in _OTC_EXCHANGES
 
 
 def _search_or_none(query: str, fuzzy: bool = False) -> tuple[dict[str, Any], ...] | None:
@@ -345,9 +358,18 @@ def _name_matches(candidate: str, quote: dict[str, Any]) -> bool:
 
 
 def _lookup_company(name: str) -> str | None:
-    """Ticker of the first stock in Yahoo's results whose name starts with ``name``."""
+    """Ticker of the first US-listed stock in Yahoo's results whose name starts with ``name``.
+
+    Foreign and OTC listings are skipped: a place name such as "Tokyo" in "What's the
+    weather in Tokyo?" must not resolve to Tokyo Electron (8035.T).
+    """
     for quote in _search_or_none(name) or ():
-        if quote["type"] in _STOCK_TYPES and quote["symbol"] and _name_matches(name, quote):
+        if (
+            quote["type"] in _STOCK_TYPES
+            and quote["symbol"]
+            and _is_us_listing(quote)
+            and _name_matches(name, quote)
+        ):
             return quote["symbol"]
     return None
 

@@ -14,6 +14,9 @@ from research_agent.memory import SessionStore, tickers
 from research_agent.memory.session import TurnKind
 from research_agent.memory.tickers import resolve_tickers
 
+# The real search function, captured before the autouse fixture makes Yahoo unreachable.
+_REAL_SEARCH = tickers._yahoo_search.__wrapped__
+
 # What the fake "Yahoo search box" returns for each query.
 FAKE_YAHOO = {
     "COST": [{"symbol": "COST", "name": "Costco Wholesale", "type": "EQUITY"}],
@@ -29,6 +32,11 @@ FAKE_YAHOO = {
     "buyback": [{"symbol": "XYZ", "name": "Unrelated Holdings", "type": "EQUITY"}],
     "NVDAA": [],
     "NVDAA~fuzzy": [{"symbol": "NVDA", "name": "NVIDIA", "type": "EQUITY"}],
+    # Found live: a city name matched a foreign listing.
+    "Tokyo": [
+        {"symbol": "8035.T", "name": "Tokyo Electron Limited", "type": "EQUITY", "exchange": "JPX"},
+        {"symbol": "TOELY", "name": "Tokyo Electron Ltd", "type": "EQUITY", "exchange": "PNK"},
+    ],
     "XQZT": [],
     "XQZT~fuzzy": [],
 }
@@ -51,6 +59,9 @@ def yahoo(monkeypatch):
 class TestResolveTickers:
     def test_company_name_is_found_via_yahoo(self, yahoo):
         assert resolve_tickers("How is Costco doing?").tickers == ("COST",)
+
+    def test_foreign_and_otc_listings_are_not_matched_by_name(self, yahoo):
+        assert resolve_tickers("What's the weather in Tokyo?").tickers == ()
 
     def test_multi_word_company_name(self, yahoo):
         assert resolve_tickers("Analyse Home Depot margins").tickers == ("HD",)
@@ -144,3 +155,30 @@ class TestSessionUsesLookup:
         assert reply == "I couldn't find a stock with the ticker NVDAA. Did you mean NVDA?"
         assert session.last_kind is TurnKind.UNKNOWN_TICKER
         assert workflow.calls == []
+
+
+def test_us_listings_are_ranked_first(monkeypatch):
+    """lookup_ticker takes the first stock result, so "XOM" must come before "XOM.NE"."""
+
+    class FakeSearch:
+        def __init__(self, *args, **kwargs):
+            self.quotes = [
+                {
+                    "symbol": "XOM.NE",
+                    "shortname": "EXXON MOBIL CDR",
+                    "quoteType": "EQUITY",
+                    "exchange": "NEO",
+                },
+                {
+                    "symbol": "XOM",
+                    "shortname": "Exxon Mobil Corporation",
+                    "quoteType": "EQUITY",
+                    "exchange": "NYQ",
+                },
+            ]
+
+    import yfinance
+
+    monkeypatch.setattr(yfinance, "Search", FakeSearch)
+    quotes = _REAL_SEARCH("Exxon Mobil")
+    assert [q["symbol"] for q in quotes] == ["XOM", "XOM.NE"]
