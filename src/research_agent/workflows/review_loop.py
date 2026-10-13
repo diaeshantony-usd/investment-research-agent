@@ -39,7 +39,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from typing import Any, Final
 
@@ -381,6 +381,32 @@ def _near(figure: _Figure, candidates: Iterable[float]) -> bool:
     return any(abs(figure.value - c) <= slack for c in candidates)
 
 
+# A unit stated once in a table's header row ("Revenue ($ bn)", "(in millions)") applies
+# to the bare dollar figures in that table's cells.
+_TABLE_UNITS: Final = (
+    (re.compile(r"\b(?:bn|billions?)\b|\$\s?b\b|\(b\)", re.IGNORECASE), 1e9),
+    (re.compile(r"\b(?:mn|millions?)\b|\$\s?m\b|\(m\)", re.IGNORECASE), 1e6),
+    (re.compile(r"\bthousands?\b|\$\s?k\b", re.IGNORECASE), 1e3),
+)
+
+
+def _table_scale(header: str) -> float | None:
+    """The unit a table header row states for its figures, if any."""
+    for pattern, scale in _TABLE_UNITS:
+        if pattern.search(header):
+            return scale
+    return None
+
+
+def _with_table_unit(figure: _Figure, scale: float | None) -> _Figure:
+    """``figure`` read in its table's unit: "$88.30" under "($ bn)" is $88.30B."""
+    if scale is None or figure.kind != "money" or figure.multiplier != 1.0:
+        return figure
+    return replace(
+        figure, value=figure.value * scale, tolerance=figure.tolerance * scale, multiplier=scale
+    )
+
+
 def check_grounding(brief: str, evidence: Evidence) -> GroundingReport:
     """Check that every figure in ``brief`` can be traced to the tool evidence.
 
@@ -400,10 +426,21 @@ def check_grounding(brief: str, evidence: Evidence) -> GroundingReport:
     report = GroundingReport()
     amounts = evidence.amounts()
     section = "Introduction"
-    for line in brief.splitlines():
+    scale: float | None = None  # unit stated in the current table's header row
+    in_table = False
+    for line in brief.translate(_TYPOGRAPHY).splitlines():
         if line.lstrip().startswith("#"):
             section = line.lstrip("# ").strip() or section
-        figures = _parse_figures(line)
+        is_table_row = line.lstrip().startswith("|")
+        if is_table_row and not in_table:
+            scale = _table_scale(line)  # first row of a new table is its header
+        in_table = is_table_row
+        if not is_table_row:
+            scale = None
+        figures = [
+            _with_table_unit(figure, scale) if evidence.matches(figure) is None else figure
+            for figure in _parse_figures(line)
+        ]
         anchors = [
             value
             for figure in figures

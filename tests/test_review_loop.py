@@ -205,6 +205,17 @@ class TestGrounding:
         assert check_grounding("Graphics $7.922B (YoY +60%)", evidence).unverified == ["60%"]
         assert check_grounding("Price $229.28, \u22485.8% below $243.37", evidence).score == 10
 
+    def test_table_header_unit_applies_to_bare_dollar_cells(self):
+        # Found live: "| Compute & Networking | $88.30 | ..." under "Revenue (≈$ bn)".
+        table = (
+            "| Segment | Revenue (\u2248$ bn) | Share |\n|---|---|---|\n"
+            "| Data center | $38.2 | 100 % |\n| Other | $99.9 | - |"
+        )
+        report = check_grounding(table, evidence_numbers(TOOLS))
+        assert report.unverified == ["100 %", "$99.9"]
+        # Outside a table the bare figure is still read as dollars.
+        assert check_grounding("Revenue $38.2.", evidence_numbers(TOOLS)).unverified == ["$38.2"]
+
     def test_unverified_figures_are_located_by_section(self):
         report = check_grounding(INVENTED_BRIEF, evidence_numbers(TOOLS))
         assert set(report.sections.values()) == {"4. Investment Stance & Outlook"}
