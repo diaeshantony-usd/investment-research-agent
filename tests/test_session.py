@@ -295,6 +295,15 @@ class TestResearchSession:
         assert "active_ticker" not in wf.calls[0]
         assert store.cache_keys("t1") == []
 
+    def test_unresearched_company_guess_keeps_the_active_company(self, store, memory):
+        # Found live: "What's the weather in Tokyo?" matched a company named "Tokyo ...".
+        s = make_session(store, memory)
+        s.ask("Analyse NVDA", show=False)
+        s._app = FakeWorkflow(brief=False)  # the planner answers without researching
+        s.ask("Is TSLA weather nice?", show=False)
+        assert s.active_ticker == "NVDA"
+        assert s.last_kind == "general"
+
     def test_resume_thread_after_restart(self, store, memory):
         s1 = make_session(store, memory)
         s1.ask("Analyse AAPL", show=False)

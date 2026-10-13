@@ -370,6 +370,7 @@ class ResearchSession:
         if not text:
             return self._finish(question or "", EMPTY_INPUT_REPLY, kind=TurnKind.EMPTY, show=show)
 
+        previous_ticker = self.active_ticker
         resolution = self._resolve(text)
         if resolution.kind is TurnKind.NEEDS_COMPANY:
             # Answer locally: running the agents without a company would waste a call.
@@ -426,6 +427,19 @@ class ResearchSession:
                         effective_ticker = planned_ticker
                         self.store.update_thread(self.thread_id, active_ticker=planned_ticker)
 
+        kind = resolution.kind
+        if (
+            kind in (TurnKind.NEW, TurnKind.SWITCH)
+            and effective_ticker == resolution.ticker
+            and "prior_research_context" not in payload
+            and not _produced_brief(state)
+        ):
+            # The company was only inferred from the wording ("What's the weather in
+            # Tokyo?" -> a company named "Tokyo ...") and the planner did not research
+            # it, so the conversation stays on the company it was about before.
+            self.store.update_thread(self.thread_id, active_ticker=previous_ticker)
+            kind, effective_ticker = TurnKind.GENERAL, previous_ticker
+
         self._learn_from_run(effective_ticker, resolution.question, state)
 
         # Cache full briefs per ticker so follow-up questions can reuse them.
@@ -439,7 +453,7 @@ class ResearchSession:
         return self._finish(
             text,
             answer,
-            kind=resolution.kind,
+            kind=kind,
             show=show,
             resolved=resolution.question,
             ticker=effective_ticker,
