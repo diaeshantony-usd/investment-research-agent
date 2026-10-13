@@ -35,9 +35,12 @@ PLANNER_ROLE = (
     "outputting a JSON object strictly formatted as:\n"
     "  {\n"
     '    "research_required": true,\n'
-    '    "ticker": "<TICKER>"\n'
+    '    "ticker": "<TICKER>",\n'
+    '    "plan": ["<step 1>", "<step 2>", "..."]\n'
     "  }\n"
-    "  where <TICKER> is the verified ticker returned by 'lookup_ticker'.\n"
+    "  where <TICKER> is the verified ticker returned by 'lookup_ticker' and 'plan' lists "
+    "3-6 ordered research steps for the specialist team (fundamentals and filings, price "
+    "trend and macro, news catalysts), focused on what the user asked.\n"
     "  DO NOT attempt to write a research brief, quote prices, or summarize the stock yourself!\n\n"
     "3. Forced Refresh / Live Data Requests:\n"
     "If the user explicitly asks for new data, fresh data, latest figures, an update/refresh, "
