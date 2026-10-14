@@ -144,7 +144,8 @@ def get_ticker_details(ticker: str) -> dict[str, Any]:
         "stock ticker symbol (e.g. 'nvidia' -> 'NVDA', 'Costco' -> 'COST', 'Apple' -> 'AAPL')."
     ),
 )
-@cached("lookup_ticker", ttl_seconds=ONE_DAY)
+# v2: results are ranked with US listings first; ignore entries cached before that.
+@cached("lookup_ticker_v2", ttl_seconds=ONE_DAY)
 def lookup_ticker(company_name: str = "", query: str = "") -> dict[str, Any]:
     """Look up the official stock ticker for a company name via Yahoo Finance.
 
