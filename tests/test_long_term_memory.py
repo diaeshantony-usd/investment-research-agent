@@ -166,8 +166,9 @@ class TestContext:
 class ReviewedWorkflow:
     """A fake graph that returns a brief and a Critic history, like the real one."""
 
-    def __init__(self) -> None:
+    def __init__(self, research: bool = True) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.research = research
 
     def invoke(self, payload: dict[str, Any]) -> GraphState:
         self.calls.append(payload)
@@ -175,6 +176,8 @@ class ReviewedWorkflow:
         state.output = BRIEF
         state.agents["DraftWriter"] = BRIEF
         state.review = review(report(), report(1, 8.3, True))
+        if self.research:
+            state.trajectory = [{"node": "planner"}, {"node": "orchestrator"}]
         return state
 
 
@@ -201,3 +204,19 @@ def test_session_learns_and_feeds_the_next_run(tmp_path):
     learned = workflow.calls[-1]["long_term_memory"]
     assert len(learned["ticker_notes"]) == 2
     assert learned["critic_lessons"]
+
+
+def test_follow_up_answers_without_research_teach_nothing(tmp_path):
+    # Found live: a follow-up answered from the cached brief was saved as a run and
+    # taught lessons such as "missing Executive Summary".
+    long_term = LongTermMemory(tmp_path / "lt")
+    session = ResearchSession(
+        thread_id="t",
+        store=SessionStore(tmp_path / "s.sqlite"),
+        memory=GraphMemory(filepath=str(tmp_path / "g.json")),
+        long_term=long_term,
+        workflow=ReviewedWorkflow(research=False),
+    )
+    session.ask("Analyse NVDA", show=False)
+    assert long_term.notes("NVDA") == []
+    assert long_term.lessons(active_only=False) == []

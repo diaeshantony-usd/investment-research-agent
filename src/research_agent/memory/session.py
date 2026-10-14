@@ -593,7 +593,9 @@ class ResearchSession:
         Best-effort: a memory write must never fail the user's turn.
         """
         review = getattr(state, "review", None)
-        if not ticker or not review or not _produced_brief(state):
+        if not ticker or not review or not _produced_brief(state) or not _ran_research(state):
+            # Only full research runs teach lessons; a short follow-up answer written from
+            # the cached brief has none of the brief's sections and would teach wrong ones.
             return
         try:
             note = self.long_term.record_run(ticker, question, review, state.output or "")
@@ -772,6 +774,12 @@ def _produced_brief(state: Any) -> bool:
     if "COVERAGE UNAVAILABLE" in output.upper() or "DATA UNAVAILABLE" in output.upper():
         return False
     return any(name in agents for name in _BRIEF_AGENTS)
+
+
+def _ran_research(state: Any) -> bool:
+    """True if the run dispatched the specialist team (a full research run)."""
+    trajectory = getattr(state, "trajectory", None) or []
+    return any(step.get("node") in ("orchestrator", "specialists") for step in trajectory)
 
 
 def _truncate(text: str | None, limit: int) -> str:
