@@ -1,243 +1,401 @@
 # Investment Research Agent
 
-A multi-agent LLM system that researches a stock. You give it a ticker and a question. It plans its research, calls financial data tools, drafts a brief, critiques and improves the draft, and returns a sourced research brief. You can then ask follow-up questions in the same session.
+A multi-agent LLM system that researches a US-listed stock. You ask a question in plain English
+("Analyse NVDA"). The system plans its research, fetches live data with tools, writes a
+five-section research brief, checks every figure in it against the raw data, fixes what fails,
+and releases the brief. You can then ask follow-up questions in the same conversation, and the
+system keeps notes and lessons that improve later runs.
 
-Built in plain Python for the AAI-520 Natural Language Processing and GenAI course (University of San Diego, MS Applied AI).
+Built for **AAI-520 Natural Language Processing and GenAI** (University of San Diego, MS Applied AI).
 
-> **Status:** project scaffold. Folders are in place; code is being added over the build phases below.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/diaeshantony-usd/investment-research-agent/blob/main/notebooks/investment_research_agent.ipynb)
 
-📄 **Detailed design document:** [Multi-Agent Investment Research System — Design Doc](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?usp=sharing)
+📄 **Design document:** [Multi-Agent Investment Research System — Design Doc](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?usp=sharing)
 
 ---
 
 ## Contents
 
-1. [How it works](#how-it-works)
-2. [Agents](#agents)
-3. [Workflow patterns](#workflow-patterns)
-4. [Critic and Refiner loop](#critic-and-refiner-loop)
-5. [Memory and follow-up questions](#memory-and-follow-up-questions)
-6. [Data sources](#data-sources)
-7. [How to run it (planned)](#how-to-run-it-planned)
-8. [Repository structure](#repository-structure)
-9. [Team and task division](#team-and-task-division)
-10. [Development workflow](#development-workflow)
-11. [Design decisions](#design-decisions)
-12. [Further reading](#further-reading)
+1. [Quick start](#quick-start)
+2. [Installation](#installation)
+3. [How to run it](#how-to-run-it)
+4. [Example questions](#example-questions)
+5. [How it works](#how-it-works)
+6. [Agents](#agents)
+7. [Workflow patterns](#workflow-patterns)
+8. [Critic and Refiner loop](#critic-and-refiner-loop)
+9. [Memory](#memory)
+10. [Data sources and tools](#data-sources-and-tools)
+11. [Configuration](#configuration)
+12. [Repository structure](#repository-structure)
+13. [Tests and code quality](#tests-and-code-quality)
+14. [Team](#team)
+15. [Design decisions](#design-decisions)
 
 ---
 
-## How it works
+## Quick start
 
-The **Orchestrator** is the controller that runs every request. It is a plain Python class that calls each agent in order, passes results between them through a shared state object (plan, evidence from every tool call, findings, drafts, critiques and a trace log), and records every step. It makes no LLM calls itself; the agents do.
+The fastest way to see everything is the project notebook in Google Colab. Nothing to install:
 
-Inside it, a **Planner** turns the question into ordered research steps. A **Router** sends each step to one of three specialist agents, which call data tools. A **Draft writer** merges their findings, and a **Critic–Refiner** loop must pass the draft before it is released. Notes and lessons from each run are saved to long-term memory so later runs plan better.
+1. Open the notebook in Colab with the **Open in Colab** badge above.
+2. Choose **Runtime → Run all**.
+3. Click **Run anyway** when Colab warns that the notebook comes from GitHub.
 
-```mermaid
-flowchart TD
-    S["ResearchSession<br/>notebook · CLI · chat UI"] -- ticker + question --> O
+The first cell clones this repository and installs it. A full run takes about 10–15 minutes,
+because it calls the LLM and the market-data APIs live. The notebook explains the design and
+demonstrates every graded requirement (planning, tool use, self-reflection, learning across runs,
+prompt chaining, routing and the evaluator-optimizer loop).
 
-    subgraph O["Orchestrator · plain Python · runs each step in order and holds the shared state"]
-        direction TB
-        P[Planner] --> R[Router]
-        R --> E[Earnings analyst]
-        R --> N[News analyst]
-        R --> K[Market analyst]
-        E --> W[Draft writer]
-        N --> W
-        K --> W
-        W --> C{Critic}
-        C -- needs work --> F[Refiner]
-        F --> C
-    end
+---
 
-    O <-- tool calls --> T[("Tool registry<br/>yfinance · NewsAPI · FRED · EDGAR")]
-    O <-- "read notes / save lessons" --> M[("Long-term memory")]
-    O -- passes review --> B[Final research brief]
+## Installation
 
-    style O fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px
+Requirements: **Python 3.10 or newer** and internet access (the LLM and the data APIs are online).
+
+```bash
+git clone https://github.com/diaeshantony-usd/investment-research-agent.git
+cd investment-research-agent
+
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+pip install -e .                   # core package and the research-agent command
+pip install -e ".[ui]"             # optional: adds the Gradio chat UI
+pip install -e ".[dev]"            # optional: tests, ruff, mypy (includes Gradio)
 ```
 
-The system has six layers, and each layer only calls the one below it:
+**API keys: no setup needed.** The project runs straight after `pip install -e .`. Working
+default keys for Ollama Cloud (the LLM), NewsAPI, FRED and Alpha Vantage are set in
+`src/research_agent/config.py`, and SEC EDGAR and Yahoo Finance need no key. To use your own keys
+or another model, copy the template and edit it; values in `.env` override the defaults (see
+[Configuration](#configuration)):
 
-| Layer | Contents |
-| --- | --- |
-| 1. Interfaces | Jupyter notebook, command line, Gradio chat UI |
-| 2. Session | `ResearchSession`: conversation state and context cache per thread |
-| 3. Orchestration | Orchestrator (control loop + shared state), Planner, Router, Critic + Refiner loop |
-| 4. Specialist agents | Earnings, News and Market analysts |
-| 5. Tools | Market data, news and macro data, company filings |
-| 6. Storage | Response cache, long-term memory, session store |
-
----
-
-## Agents
-
-All agents are plain Python classes built on a shared `BaseAgent` interface (name, system prompt, allowed tools, `run()`).
-
-| Agent | What it does | Output |
-| --- | --- | --- |
-| Planner | Turns a ticker and question into an ordered step plan; reads notes from past runs | JSON plan (Pydantic) |
-| Router | Sends each step to the right specialist and says why | `{route, reason}` |
-| Earnings analyst | EPS surprise, financial ratios, passages from 10-K/10-Q filings | Earnings findings |
-| News analyst | Runs the five-stage news prompt chain | Cited news digest |
-| Market analyst | Price trend, volatility and macro context | Market findings |
-| Draft writer | Merges findings into a structured brief (thesis, bull case, bear case, risks, metrics, stance) | Draft brief |
-| Critic | Scores the draft on five dimensions and lists specific issues | Critique report |
-| Refiner | Fixes only what the Critic flagged | Revised brief + change log |
-
----
-
-## Workflow patterns
-
-| Pattern | How it is used |
-| --- | --- |
-| **Prompt chaining** | The News analyst runs: ingest → preprocess (dedupe, clean, 30-day filter) → classify (topic + sentiment) → extract (entities, figures) → summarize (five cited bullets) |
-| **Routing** | The Router classifies each research step and sends it to the earnings, news or market specialist |
-| **Evaluator–optimizer** | The Draft writer produces a brief, the Critic scores it, and the Refiner revises it until it passes |
-
----
-
-## Critic and Refiner loop
-
-**Critic.** Runs in three stages:
-
-1. Code checks (no LLM): every number must match a stored tool result and cite it, every claim needs a citation, and all required sections must be present.
-2. LLM judge: scores five dimensions from 0 to 10, with the code-check results given as facts.
-3. Decision: any unverified number sends the draft back. Otherwise it passes when the weighted score is 8 or more.
-
-| Dimension | Weight |
-| --- | --- |
-| Grounding (numbers match the data) | 30% |
-| Coverage (fundamentals, news, price, macro) | 20% |
-| Balance (bull and bear cases) | 20% |
-| Clarity | 15% |
-| Actionability (clear stance) | 15% |
-
-**Refiner.** Handles at most five issues per round, blockers first. It rewrites only the flagged sections, writes no number that isn't in the stored tool results, and fetches missing data through the Router instead of guessing. Every change is logged.
-
-**Stopping rules.** The loop stops when the draft passes, after three refinement rounds, or when the score improves by less than 0.5 in a round. If it stops without a pass, it releases the best version with the remaining issues attached as reviewer notes.
-
----
-
-## Memory and follow-up questions
-
-| Memory | Holds | Stored in | Used for |
-| --- | --- | --- | --- |
-| Short-term | Recent turns, a summary of older turns, the last brief and data already fetched | `sessions.sqlite`, keyed by `thread_id` | Follow-up questions without re-fetching data |
-| Long-term | Per-ticker notes, last stance and recurring critic lessons | `data/memory/{ticker}.json`, `lessons.json` | Better plans on later runs |
-
-For a follow-up, the session first checks whether the answer is already in context. If it isn't, the Planner asks only for the missing data instead of re-running the full analysis.
-
----
-
-## Data sources
-
-| Tool | Source | Returns | Fallback |
-| --- | --- | --- | --- |
-| `get_price_history` | yfinance | Prices, returns, volatility, moving averages | Cached file |
-| `get_fundamentals`, `get_earnings` | yfinance, Alpha Vantage | Financial statements, ratios, EPS surprise | Alpha Vantage |
-| `get_news` | NewsAPI.org, yfinance | Headlines, source, date, URL | Kaggle financial-news CSV |
-| `get_macro` | FRED API | Interest rates, CPI, 10-year yield | Cached file |
-| `search_filings` | SEC EDGAR + local vector store | Relevant 10-K/10-Q passages | Keyword search |
-
-Every API response is cached in `data/cache/`, so the notebook can re-run without network access.
+```bash
+cp .env.example .env
+```
 
 ---
 
 ## How to run it
 
-```bash
-# setup
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # add your API keys
+There are four ways to use the system. All of them go through the same `ResearchSession`, so
+follow-up questions, caching and long-term memory behave the same everywhere.
 
-# command line
-python -m research_agent chat --ticker NVDA --thread nvda-01
+### 1. Command line: one question
+
+```bash
+research-agent "Analyse NVIDIA (NVDA)"
+# or, without installing the console script:
+python cli.py "Analyse NVIDIA (NVDA)"
 ```
+
+While it runs, each line shows the agent at work (`Agent: [...]`) or a tool call with its
+arguments (`Tool: [...]`). The released brief is printed at the end.
+
+### 2. Command line: a conversation (`--interactive`)
+
+```bash
+python cli.py --interactive              # or: research-agent --interactive
+```
+
+The session starts and prints its thread id, then waits at the `Query >` prompt:
+
+```text
+=== Research Session Started [thread_id: session_20261015_100031_9907] ===
+Type 'exit' or 'quit' to end session.
+
+Query > Analyse Apple (AAPL)
+  Agent: [ResearchPlanner] Analyzing query intent and resolving company ticker symbol...
+  Tool: [ResearchPlanner] lookup_ticker(company_name='Apple', query='Apple')
+  Tool: [ResearchRouter] delegate_to_earningsanalyst(...)
+  Tool: [EarningsAnalyst] get_earnings_data(ticker='AAPL')
+  ...
+=== RELEASED BRIEF ===
+...
+Query > What about its margins?
+=== RELEASED BRIEF ===
+Apple's most recent quarter showed: gross margin ..., operating margin ..., net margin ...
+Query > exit
+```
+
+- A full research question takes about 3 minutes; a follow-up about the same company is answered
+  from the cached brief in a few seconds, without naming the company again.
+- Type `memory` to print what the session remembers (active company, tickers, conversation).
+- Type `exit`, `quit` or `q` (or press Ctrl+D) to leave.
+- Conversations are saved. Reopen one with its thread id:
+  `python cli.py --interactive --thread-id session_20261015_100031_9907` (short form: `-i -t <id>`).
+
+### 3. Gradio chat UI
+
+```bash
+pip install -e ".[ui]"     # Gradio is an optional extra
+python gradio_app.py       # or: research-agent-ui
+```
+
+Open <http://127.0.0.1:7860> in your browser and type a question in the chat box, or click one of
+the suggestion chips ("Analyse NVDA", "Analyse AAPL", "What is operating margin?"). A
+"Researching…" status shows while the agents work; the reply is the brief, with the agent steps
+in a collapsible "Reasoning · N steps" panel above it.
+
+- Ask follow-ups in the same chat; the chips switch to follow-ups for the active company.
+- **New research** starts a fresh conversation. The left rail lists earlier conversations; click
+  one to reopen it, or open **Resume by thread id**, enter an id and click **Start / Resume**.
+- **Export report** downloads the conversation as a Markdown report.
+- Each browser tab is its own conversation. Stop the server with Ctrl+C in the terminal.
+
+### 4. Python or a notebook
 
 ```python
-# notebook
-from research_agent import ResearchSession
+from research_agent.memory import ResearchSession
 
-s = ResearchSession("nvda-01")
-s.ask("Analyse NVDA")
-s.ask("How do its margins compare?")  # follow-up in the same session
+session = ResearchSession(thread_id="nvda-01")
+
+# In a notebook, ask() renders the answer and the agent trajectory as Markdown.
+session.ask("Analyse NVDA")
+
+# In a script, use show=False to get the answer back as text.
+brief = session.ask("Analyse NVDA", show=False)
+answer = session.ask("What about its margins?", show=False)   # follow-up, same company
+
+print(session.active_ticker)   # NVDA
+print(session.last_kind)       # how the last turn was classified, e.g. follow_up
 ```
 
-```bash
-# Gradio chat UI
-pip install -e ".[ui]"       # adds gradio on top of the base install
-research-agent-ui            # launches at http://127.0.0.1:7860
-# or, without installing the console script:
-python gradio_app.py
-```
+The project notebook, [`notebooks/investment_research_agent.ipynb`](notebooks/investment_research_agent.ipynb),
+walks through the architecture, each agent and every requirement with real runs. The
+[`notebooks/demo/`](notebooks/demo) folder has one short notebook per agent.
 
-Each browser tab gets its own session (shown as a Thread ID in the UI), so
-follow-up questions resolve against that tab's active ticker exactly as in the
-notebook or command line. Enter a thread id and click "Start / Resume" to reopen a
-past conversation from the session store.
+---
 
-API keys needed: an LLM provider, NewsAPI, FRED and Alpha Vantage (free tiers).
+## Example questions
+
+| You ask | What happens |
+| --- | --- |
+| `Analyse NVDA` | Full research: the router sends the request to all three specialists, then the Draft writer, Critic and Refiner produce the brief |
+| `Analyse Apple` · `How is Microsoft doing?` | Company names are resolved to US tickers with Yahoo Finance (AAPL, MSFT) |
+| `How are Apple's latest earnings and margins?` | Research routed to the **Earnings** analyst only |
+| `What is the price trend and RSI for Tesla?` | Research routed to the **Market** analyst only |
+| `Any recent news catalysts for Exxon Mobil?` | Research routed to the **News** analyst only |
+| `Compare JPMorgan's fundamentals and news sentiment` | Research routed to the **Earnings** and **News** analysts |
+| `What about its margins?` (after a company was researched) | Follow-up: answered from the cached brief, no new research |
+| `What are its main risks?` · `Summarise NVDA's latest earnings` | Follow-ups on the active company |
+| `What is operating margin?` · `What is EBITDA?` | Finance concept: explained directly, no research |
+| `Hi, what can you do?` | Greeting: the assistant introduces what it can do |
+| `Analyse NVDAA` | Unknown ticker: "Did you mean NVDA?" instead of researching |
+| `What's the weather in Tokyo?` | Off-topic: politely declined; the active company is kept |
+| `What was I researching earlier?` | Lists the companies researched in this conversation |
+
+A full research run takes a few minutes. Ask for fresh data (for example "Refresh NVDA with the
+latest figures") to re-run the research instead of answering from the cached brief.
+
+---
+
+## How it works
+
+![Architecture of the research graph](docs/diagrams/architecture.png)
+
+The system is a graph of six nodes built with the team's own small agent framework
+(`src/research_agent/agent_framework.py`: `Agent`, `Tool`, `OrchestratorAgent`, `GraphState`,
+`StateGraph`, `GraphMemory`). The graph is compiled in `workflows/graph.py`. Nodes share one
+`GraphState` object: each node reads what it needs and writes its result back, and raw tool results
+stay on the state so the Critic can check the brief against them.
+
+1. **planner** verifies the company with `lookup_ticker` and returns a JSON dispatch with the
+   ticker and an ordered research plan, or answers directly when no research is needed.
+2. **orchestrator** (the router) delegates to only the specialists the question needs. Each
+   specialist is an agent wrapped as a tool, so delegation is an ordinary tool call.
+3. **draft_writer** combines the findings into the five-section brief.
+4. **critic** reviews the draft; on REVISE, **refiner** fixes the flagged sections and the critic
+   reviews again.
+5. **release** returns the best version.
+
+![Sequence of one research request](docs/diagrams/sequence.png)
+
+| Layer | Contents |
+| --- | --- |
+| Interfaces | Project notebook, command line (`cli.py`, `research-agent`), Gradio chat UI |
+| Session | `ResearchSession`: conversation memory, follow-up resolution, cached briefs, long-term memory |
+| Orchestration | `StateGraph` with the planner and review routers; Critic and Refiner loop |
+| Agents | Planner, Router, Earnings / Market / News analysts, Draft writer, Refiner |
+| Tools | Yahoo Finance, SEC EDGAR, FRED, NewsAPI, Alpha Vantage wrappers with an on-disk cache |
+| Storage | API cache, run checkpoints, session database, long-term memory |
+
+---
+
+## Agents
+
+| Agent | File | Tools | Output |
+| --- | --- | --- | --- |
+| `ResearchPlanner` | `agents/planner.py` | `lookup_ticker`, checkpoint look-up tools | JSON: `research_required`, `ticker`, ordered `plan` |
+| `ResearchRouter` | `agents/router.py` | one `delegate_to_<specialist>` tool per specialist | Specialist findings |
+| `EarningsAnalyst` | `agents/earnings_analyst.py` | `get_earnings_data`, `search_sec_filings` | Fundamentals, margins, valuation, filing passages |
+| `MarketAnalyst` | `agents/market_analyst.py` | `get_market_technicals`, `get_macro_indicators` | Price trend, momentum, macro backdrop |
+| `NewsAnalyst` | `agents/news_analyst.py` | `get_news_data` (five-stage chain) | Cited news digest and sentiment |
+| `DraftWriter` | `agents/draft_writer.py` | none | Brief: Executive Summary, Fundamentals, Technicals, Catalysts & Risks, Stance |
+| `Critic` | `workflows/review_loop.py` | none (code checks + LLM judge) | Scores, issues by section, PASS / REVISE |
+| `BriefRefiner` | `agents/refiner.py` | the five data tools | Revised brief and change log |
+
+---
+
+## Workflow patterns
+
+| Pattern | Implementation |
+| --- | --- |
+| **Prompt chaining** | The News analyst (`workflows/news_chain.py`): ingest → preprocess → classify → extract → summarize |
+| **Routing** | `route_planner` decides research vs. a direct answer; the router picks the specialists a question needs |
+| **Evaluator–optimizer** | Draft writer generates, Critic evaluates, Refiner improves, until the brief passes or a stop rule applies |
+
+![The News analyst's five-stage prompt chain](docs/diagrams/news_chain.png)
+
+| Stage | Done by | What happens |
+| --- | --- | --- |
+| 1. Ingest | tool | `get_news_data`: NewsAPI search for the company (Yahoo Finance news as fallback) |
+| 2. Preprocess | code | Clean the text, remove duplicates, keep articles inside the date window |
+| 3. Classify | LLM (JSON) | Topic, sentiment and relevance per article; off-topic articles are dropped |
+| 4. Extract | LLM (JSON) | Key figures and entities; a figure is kept only if it appears verbatim in the article |
+| 5. Summarize | LLM | Five cited bullets; the overall sentiment is computed in code |
+
+![Routing at two levels](docs/diagrams/routing.png)
+
+---
+
+## Critic and Refiner loop
+
+![The evaluator-optimizer loop](docs/diagrams/review_loop.png)
+
+**Critic** (`workflows/review_loop.py`) reviews every draft in three stages:
+
+1. **Code checks (no LLM).** Every figure in the brief must match a number in the raw tool results,
+   allowing for its rounding and units (filing tables in thousands or millions, "bn"), or be a
+   percentage calculated from figures on the same line. All five sections must be present.
+2. **LLM judge.** Scores coverage, balance, clarity and actionability from 0 to 10 and lists issues
+   by section. The grounding score comes from the code check, so the model cannot argue its way
+   past an invented number.
+3. **Verdict.** PASS needs no unverified figures, no missing sections and a weighted score of at
+   least 8/10. Otherwise REVISE.
+
+| Dimension | Weight | Scored by |
+| --- | --- | --- |
+| Grounding | 30% | code (share of verified figures) |
+| Coverage | 20% | LLM judge |
+| Balance | 20% | LLM judge |
+| Clarity | 15% | LLM judge |
+| Actionability | 15% | LLM judge |
+
+**Refiner** (`agents/refiner.py`) fixes at most five issues per round, blockers first. It rewrites
+only the flagged sections, may call the data tools again to replace an unsupported figure, and
+returns a change log.
+
+**Stopping rules.** The loop stops on a PASS, after three refinements, or when a round improves the
+score by less than 0.5. `release` then returns the best-scoring version, with reviewer notes if no
+version passed.
+
+---
+
+## Memory
+
+![The three memory layers](docs/diagrams/memory.png)
+
+| Memory | Class | Lifetime | Stored in | Used for |
+| --- | --- | --- | --- | --- |
+| Run checkpoints | `GraphMemory` | one run | `data/memory/graph_memory_store.json` | Auditing a run; the planner can look up earlier checkpoints |
+| Conversation | `SessionStore` + `ResearchSession` | one conversation (`thread_id`) | `data/memory/sessions.sqlite` | Turns, active company, rolling summary, cached brief per ticker; follow-up questions |
+| Long-term | `LongTermMemory` | across all conversations | `data/memory/long_term/{TICKER}.json`, `lessons.json` | Learning across runs |
+
+**Learning across runs.** After each research run, `ResearchSession` saves a dated note for the
+ticker (stance, first-draft and final Critic scores, open issues) and counts recurring first-draft
+weaknesses as **lessons** (invented price levels, unsupported multiples, a missing section, a low
+balance score, ...). A lesson becomes active once it has appeared in two or more runs. Active
+lessons and the ticker's recent notes are added to the next request, so the Draft writer avoids
+earlier mistakes. Notes are hints only: data is always fetched fresh.
+
+![How long-term memory learns](docs/diagrams/learning.png)
+
+---
+
+## Data sources and tools
+
+Every tool returns JSON text, caches its responses in `data/cache/`, and reports a failed source in
+its result instead of raising, so an agent can continue with partial data.
+
+| Tool | Data source | Fallback | Returns |
+| --- | --- | --- | --- |
+| `lookup_ticker` | Yahoo Finance search (US listings) | none | Verified ticker and company name |
+| `get_earnings_data` | Yahoo Finance financial statements | Alpha Vantage | Latest quarter revenue, margins, growth, forward P/E, free cash flow, EPS history |
+| `search_sec_filings` | SEC EDGAR (latest 10-K / 10-Q), embedded chunks ranked by similarity | Keyword ranking if embeddings are unavailable | The filing passages most relevant to a query |
+| `get_market_technicals` | Yahoo Finance price history | Alpha Vantage | Price, 50/200-day SMA, 14-day RSI, beta, trend |
+| `get_macro_indicators` | FRED | none | Fed funds rate, 10-year Treasury, CPI, each with its date |
+| `get_news_data` | NewsAPI.org | Yahoo Finance news | Recent articles for the company |
+
+---
+
+## Configuration
+
+Settings come from environment variables or a `.env` file in the repository root
+(`.env.example` lists them all):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEFAULT_LLM_PROVIDER` | `ollama` | `ollama` (Ollama Cloud) or `openai` |
+| `DEFAULT_MODEL` | `gpt-oss:120b` | Model used by every agent with Ollama |
+| `OLLAMA_HOST`, `OLLAMA_API_KEY` | `https://ollama.com`, course key | Ollama Cloud endpoint and key |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `DEFAULT_OPENAI_MODEL` | empty, OpenAI, `gpt-4o-mini` | Used when the provider is `openai` |
+| `NEWS_API_KEY`, `FRED_API_KEY`, `ALPHA_VANTAGE_KEY` | course keys | Data APIs (free tiers) |
+| `EDGAR_USER_AGENT` | project contact | SEC requires a descriptive User-Agent; set your own contact details |
+| `EDGAR_EMBEDDING_MODEL` | `nomic-embed-text` | Local Ollama embedding model for filing search (keyword ranking is used without it) |
+| `LOG_LEVEL` | `INFO` | Logging level; logs are written to `logs/` |
 
 ---
 
 ## Repository structure
 
 ```
-Final-project/
+investment-research-agent/
+├── cli.py                     # command-line entry point (same as `research-agent`)
+├── gradio_app.py              # Gradio UI entry point (same as `research-agent-ui`)
+├── pyproject.toml             # package, dependencies, ruff / mypy / pytest settings
+├── .env.example               # configuration template
 ├── src/research_agent/
-│   ├── agents/        # Planner, Router, specialists, Draft writer, Critic, Refiner
-│   ├── tools/         # Tool registry and data wrappers (yfinance, NewsAPI, FRED, EDGAR, Alpha Vantage)
-│   ├── workflows/     # News prompt chain, Critic–Refiner review loop, orchestrator
-│   ├── memory/        # ResearchSession, short-term and long-term memory
-│   └── interfaces/    # Command line and Gradio chat UI
-├── notebooks/         # Main project notebook and demos
-├── tests/             # pytest cases (Critic and Refiner tests, tool tests)
-├── data/
-│   ├── cache/         # Cached API responses (not committed)
-│   └── memory/        # Long-term memory files (not committed)
-└── docs/diagrams/     # Architecture and workflow diagrams
+│   ├── agent_framework.py     # Agent, Tool, OrchestratorAgent, GraphState, StateGraph, GraphMemory
+│   ├── config.py              # settings, paths and logging
+│   ├── agents/                # planner, router, earnings / market / news analysts, draft writer, critic, refiner
+│   ├── tools/                 # yahoo_finance, earnings, filings, market, macro, news, alpha_vantage, cache
+│   ├── workflows/             # graph.py (research graph), news_chain.py, review_loop.py, session.py (CLI)
+│   ├── memory/                # ResearchSession, SessionStore, LongTermMemory, ticker resolution
+│   └── interfaces/            # LLM clients (Ollama, OpenAI) and the Gradio chat UI
+├── notebooks/
+│   ├── investment_research_agent.ipynb   # project notebook (submission)
+│   └── demo/                  # one notebook per agent and an end-to-end demo
+├── tests/                     # offline pytest suite (scripted LLMs, stubbed data tools)
+├── docs/diagrams/             # Mermaid sources (.mmd) and rendered diagrams (.png)
+└── data/                      # cache/ and memory/ (created at run time, not committed)
 ```
 
 ---
 
-## Team and task division
+## Tests and code quality
 
-Each member owns at least two agents end to end (prompt, code, notebook section and comments), plus the components those agents depend on.
-
-| Member | Agents | Supporting components |
-| --- | --- | --- |
-| **Ashok Bhairwal** | News analyst, Market analyst | Tool registry and caching, EDGAR vector search, Gradio chat UI |
-| **N L N Sai Krishna Akula** | Planner, Router, Earnings analyst | Orchestrator, command line, notebook assembly and PDF export |
-| **Diaesh Antony** | Draft writer, Critic, Refiner | Session and long-term memory, evaluation runs and charts |
-
-**Build plan**
-
-| Phase | Ashok Bhairwal | N L N Sai Krishna Akula | Diaesh Antony |
-| --- | --- | --- | --- |
-| 1 · Sep 27–Oct 4 | Repo setup, README, requirements; tool wrappers with caching | Shared state schema, LLM client, Planner | `ResearchSession` and session store |
-| 2 · Oct 5–11 | News analyst (prompt chain), Market analyst, EDGAR vector search | Router, Earnings analyst, orchestrator end to end | Draft writer, Critic, Refiner loop; long-term memory |
-| 3 · Oct 12–18 | Gradio chat UI; PEP 8 pass with `ruff` | Command line; prompt tuning; notebook assembly and PDF export | Evaluation runs and charts; follow-up and memory demos |
-| Oct 19 | Final review | Final submission | Final review |
-
-**Hand-offs between members**
-
-- Ashok's tools must be ready before the Earnings analyst can fetch data.
-- Sai Krishna's orchestrator passes drafts to Diaesh's Critic and Refiner.
-- Diaesh's long-term memory feeds notes back into Sai Krishna's Planner.
-
-The `BaseAgent` interface and shared state format are agreed in Phase 1 so all three can build in parallel.
+```bash
+pip install -e ".[dev]"
+pytest                      # offline suite with a coverage report (fails below 90% line coverage)
+ruff check .                # PEP 8, PEP 257 docstrings, import order and bug-prone patterns
+ruff format --check .       # formatting (100-character lines)
+mypy src                    # type checks
+```
 
 ---
 
-## Development workflow
+## Team
 
-- Work on your own branch (`feature/<name>-<topic>`) and open a pull request for a teammate to review before merging into `main`.
-- Follow PEP 8; run `ruff check .` before pushing.
-- Never commit API keys. Keep them in `.env` (ignored by git) and document variable names in `.env.example`.
-- Add a pytest case for each agent's key behaviour in `tests/`.
+| Member | Agents | Supporting components |
+| --- | --- | --- |
+| **Ashok Bhairwal** | News analyst, Market analyst | Data tools and caching, EDGAR search, Gradio chat UI, evaluation |
+| **N L N Sai Krishna Akula** | Planner, Router, Earnings analyst | Research graph and orchestration, command line, notebook assembly |
+| **Diaesh Antony** | Draft writer, Critic, Refiner | Conversation and long-term memory |
+
+Development workflow: work on a feature branch, open a pull request for review, run `ruff check .`
+and `pytest` before pushing, and never commit API keys (`.env` is ignored by git).
 
 ---
 
@@ -245,15 +403,13 @@ The `BaseAgent` interface and shared state format are agreed in Phase 1 so all t
 
 | Decision | Chosen | Alternative | Why |
 | --- | --- | --- | --- |
-| Architecture | Multiple specialist agents | One general agent | Routing needs distinct specialists, and each is easier to test on its own |
-| Orchestration | Plain Python classes | Off-the-shelf agent framework | Routing, loops and session state are our own readable code |
-| Learning across runs | Memory notes and critic lessons | Fine-tuning a model | Fits the timeline and free-tier budget, and the effect is easy to show |
+| Architecture | Specialist agents behind a router | One general agent | Routing needs distinct specialists, and each is easier to test on its own |
+| Orchestration | Own small framework (`agent_framework.py`) | LangChain / LangGraph | Every step, tool call and state change is our own readable, testable code |
+| Fact checking | Code compares every figure with raw tool data | LLM-only review | An LLM judge cannot tell a real figure from an invented one |
+| Learning across runs | Notes and Critic lessons in long-term memory | Fine-tuning a model | Fits the timeline and free-tier budget, and the effect is easy to show |
 
----
-
-## Further reading
-
-The full design, including all diagrams, the Critic and Refiner specification and the evaluation plan, is in the [detailed design document](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?usp=sharing).
+The full design, including the Critic and Refiner specification and the evaluation plan, is in the
+[design document](https://docs.google.com/document/d/1PjKU47bT6VsPgoFgJWckJpvaSPAeqeclrmysAvf-fb8/edit?usp=sharing).
 
 ---
 
