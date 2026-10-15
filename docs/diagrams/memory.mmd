@@ -1,0 +1,19 @@
+flowchart TB
+    subgraph RUN["One research run"]
+        G["<b>GraphMemory</b><br/>checkpoint of GraphState<br/>after the run"]
+    end
+    subgraph CONV["One conversation (thread_id)"]
+        SS[("<b>SessionStore</b> · SQLite<br/>turns · active company<br/>rolling summary · cached brief")]
+    end
+    subgraph LIFE["All conversations"]
+        LT[("<b>LongTermMemory</b> · JSON<br/>ticker notes<br/>Critic lessons")]
+    end
+    RS["ResearchSession"] -- "follow-up context,<br/>cached brief" --> SS
+    RS -- "after each research run:<br/>note + lessons" --> LT
+    LT -- "active lessons + recent notes<br/>added to the next request" --> RS
+    WF["research graph"] -- "checkpoint" --> G
+    RS -- "invokes" --> WF
+    classDef store fill:#f4f1ea,stroke:#8a7a5a;
+    classDef agent fill:#eef3fb,stroke:#2f5d9c,stroke-width:1.5px;
+    class SS,LT,G store;
+    class RS,WF agent;

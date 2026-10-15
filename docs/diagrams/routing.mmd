@@ -1,0 +1,17 @@
+flowchart TD
+    Q(["Question"]) --> P{"<b>Planner</b><br/>route_planner"}
+    P -- "finance concept<br/>(What is EBITDA?)" --> D1(["Explained directly"])
+    P -- "greeting" --> D2(["Introduces capabilities"])
+    P -- "non-financial request" --> D3(["Polite refusal"])
+    P -- "follow-up on a<br/>researched company" --> D4(["Answered from<br/>the cached brief"])
+    P -- "company to research:<br/>research_required" --> R{"<b>Router</b><br/>which domains does<br/>the question ask about?"}
+    R -- "earnings, margins,<br/>valuation" --> E["EarningsAnalyst"]
+    R -- "price trend, RSI,<br/>rates" --> M["MarketAnalyst"]
+    R -- "news, catalysts,<br/>sentiment" --> N["NewsAnalyst"]
+    R -- "whole company<br/>(Analyse NVDA)" --> ALL["all three"]
+    classDef gate fill:#fff4e0,stroke:#c98a12,stroke-width:1.5px;
+    classDef agent fill:#eef3fb,stroke:#2f5d9c,stroke-width:1.5px;
+    classDef io fill:#e8f5ee,stroke:#2e7d5b,stroke-width:1.5px;
+    class P,R gate;
+    class E,M,N,ALL agent;
+    class Q,D1,D2,D3,D4 io;

@@ -1,0 +1,16 @@
+flowchart TB
+    A["<b>Research run</b><br/>any company"] --> B["Critic reviews the <b>first draft</b>"]
+    A --> N[("<b>TICKER.json</b><br/>dated note: stance,<br/>scores, open issues")]
+    B --> C["<b>derive_lessons()</b><br/>unverified figures by kind · missing sections<br/>dimensions scored below 7"]
+    C --> D[("<b>lessons.json</b><br/>run count per lesson")]
+    D -- "seen in 2 or more runs" --> E["<b>active lesson</b>"]
+    E --> F["added to the next request<br/>as <i>long_term_memory</i>"]
+    N -- "last 3 notes for the ticker" --> F
+    F --> G["<b>Next run</b><br/>Draft writer follows the lessons;<br/>notes are hints, data is fetched fresh"]
+    G -. "its first draft is reviewed again" .-> B
+    classDef store fill:#f4f1ea,stroke:#8a7a5a;
+    classDef key fill:#e8f5ee,stroke:#2e7d5b,stroke-width:1.5px;
+    classDef agent fill:#eef3fb,stroke:#2f5d9c,stroke-width:1.5px;
+    class D,N store;
+    class E key;
+    class A,B,C,F,G agent;

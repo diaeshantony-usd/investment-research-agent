@@ -1,0 +1,31 @@
+flowchart TD
+    Q(["User question"]) --> P
+    P["<b>planner</b><br/>ResearchPlanner<br/><i>tool: lookup_ticker</i>"]
+    P -- "general question,<br/>greeting, off-topic" --> A(["Direct answer"])
+    P -- "research_required<br/>+ ticker + plan" --> O
+    O["<b>orchestrator</b><br/>ResearchRouter<br/><i>delegates only to the<br/>specialists it needs</i>"]
+    subgraph SPEC["Specialists (agents wrapped as tools)"]
+        direction LR
+        E["<b>EarningsAnalyst</b><br/><i>get_earnings_data<br/>search_sec_filings</i>"]
+        M["<b>MarketAnalyst</b><br/><i>get_market_technicals<br/>get_macro_indicators</i>"]
+        N["<b>NewsAnalyst</b><br/><i>get_news_data<br/>5-stage prompt chain</i>"]
+    end
+    O --> E & M & N
+    SPEC -- "findings" --> W
+    W["<b>draft_writer</b><br/>DraftWriter<br/><i>5-section brief&nbsp;</i>"] --> C
+    C{"<b>critic</b><br/>code grounding check<br/>+ LLM judge"}
+    C -- "REVISE" --> R["<b>refiner</b><br/>BriefRefiner<br/><i>fixes flagged sections</i>"]
+    R -- "revised draft" --> C
+    C -- "PASS or stop rule" --> L["<b>release</b><br/>best version"]
+    L --> B(["Research brief"])
+    S[("GraphState<br/>question · ticker · agents<br/>tools · review · trajectory")]
+    SPEC -. "raw tool results" .-> S
+    S -. "evidence" .-> C
+    classDef agent fill:#eef3fb,stroke:#2f5d9c,stroke-width:1.5px;
+    classDef gate fill:#fff4e0,stroke:#c98a12,stroke-width:1.5px;
+    classDef io fill:#e8f5ee,stroke:#2e7d5b,stroke-width:1.5px;
+    classDef store fill:#f4f1ea,stroke:#8a7a5a;
+    class P,O,E,M,N,W,R agent;
+    class C gate;
+    class Q,A,B,L io;
+    class S store;

@@ -1,0 +1,17 @@
+flowchart TD
+    W["<b>Generate</b><br/>Draft writer: first draft"] --> G
+    subgraph CRITIC[" "]
+        G["<b>Evaluate · Critic</b><br/>1 · code checks:<br/>every figure vs raw tool data<br/>all 5 sections present"] --> J["<b>2 · LLM judge</b><br/>coverage · balance<br/>clarity · actionability"]
+        J --> V{"<b>3 · Verdict</b><br/>0 unverified, 0 missing,<br/>weighted ≥ 8.0?"}
+    end
+    V -- "yes: PASS" --> REL(["<b>release</b>"])
+    V -- "no: REVISE" --> S{"stop rule?<br/>3 refinements done, or<br/>gain < 0.5 last round"}
+    S -- "yes" --> BEST(["<b>release best version</b><br/>+ reviewer notes"])
+    S -- "no" --> R["<b>Refine</b><br/>Refiner fixes ≤ 5 issues,<br/>blockers first; may re-call tools"]
+    R -- "revised draft + change log" --> G
+    classDef agent fill:#eef3fb,stroke:#2f5d9c,stroke-width:1.5px;
+    classDef gate fill:#fff4e0,stroke:#c98a12,stroke-width:1.5px;
+    classDef io fill:#e8f5ee,stroke:#2e7d5b,stroke-width:1.5px;
+    class W,R,G,J agent;
+    class V,S gate;
+    class REL,BEST io;

@@ -1,0 +1,15 @@
+flowchart LR
+    I["<b>1 · Ingest</b><br/><i>tool</i><br/>get_news_data<br/>NewsAPI, Yahoo fallback"] --> P["<b>2 · Preprocess</b><br/><i>code</i><br/>clean, de-duplicate,<br/>date window"]
+    P --> C["<b>3 · Classify</b><br/><i>LLM · JSON</i><br/>topic, sentiment,<br/>relevance"]
+    C --> X["<b>4 · Extract</b><br/><i>LLM · JSON</i><br/>figures and entities"]
+    X --> S["<b>5 · Summarize</b><br/><i>LLM</i><br/>five cited bullets"]
+    C -. "off-topic dropped" .-> D1(( ))
+    X -. "figure not verbatim<br/>in article: dropped" .-> D2(( ))
+    C -. "sentiment counts" .-> SE["overall sentiment<br/>computed in code"]
+    SE --> S
+    classDef llm fill:#eef3fb,stroke:#2f5d9c,stroke-width:1.5px;
+    classDef codeStep fill:#f4f1ea,stroke:#8a7a5a;
+    classDef drop fill:#fbe5e3,stroke:#b4483c;
+    class C,X,S llm;
+    class I,P,SE codeStep;
+    class D1,D2 drop;

@@ -1,0 +1,30 @@
+sequenceDiagram
+
+    actor U as User
+    participant S as ResearchSession
+    participant P as Planner
+    participant O as Router
+    participant X as Specialists
+    participant T as Data tools
+    participant W as Draft writer
+    participant C as Critic
+    participant R as Refiner
+    U->>S: "Analyse NVDA"
+    S->>S: add context + lessons
+    S->>P: question + context
+    P->>T: lookup_ticker("NVDA")
+    T-->>P: NVDA (verified)
+    P-->>O: {research_required, ticker, plan}
+    O->>X: delegate_to_earnings / market / news
+    X->>T: earnings, filings, technicals, macro, news
+    T-->>X: JSON results (kept in GraphState.tools)
+    X-->>O: findings
+    O-->>W: findings + raw data
+    W-->>C: first draft
+    loop until PASS, 3 refinements, or gain < 0.5
+        C-->>R: REVISE + issues by section
+        R-->>C: revised draft + change log
+    end
+    C-->>S: released brief
+    S->>S: cache brief, save note
+    S-->>U: research brief
