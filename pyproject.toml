@@ -7,7 +7,7 @@ name = "research-agent"
 version = "0.1.0"
 description = "Institutional-grade multi-agent equity research system built with StateGraph"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"  # pandas 3 needs Python 3.11+
 dependencies = [
     "ollama>=0.4.0",
     "openai>=1.0.0",

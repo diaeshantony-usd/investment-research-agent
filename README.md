@@ -51,7 +51,7 @@ prompt chaining, routing and the evaluator-optimizer loop).
 
 ## Installation
 
-Requirements: **Python 3.10 or newer** and internet access (the LLM and the data APIs are online).
+Requirements: **Python 3.11 or newer** and internet access (the LLM and the data APIs are online).
 
 ```bash
 git clone https://github.com/diaeshantony-usd/investment-research-agent.git
