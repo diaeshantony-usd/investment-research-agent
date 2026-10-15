@@ -557,8 +557,7 @@ class ResearchSession:
         valid_turns = [
             t
             for t in research_turns
-            if "COVERAGE UNAVAILABLE" not in str(t.get("answer", "")).upper()
-            and "DATA UNAVAILABLE" not in str(t.get("answer", "")).upper()
+            if not _is_unavailable_notice(str(t.get("answer", "")))
         ]
         ticker_sequence = [str(t["ticker"]) for t in valid_turns if t.get("ticker")]
         return list(dict.fromkeys(ticker_sequence))
@@ -621,7 +620,7 @@ class ResearchSession:
 
         brief_text = str(cached["value"].get("brief", ""))
         # If cache contains an unavailable data notice, purge it and return empty
-        if "COVERAGE UNAVAILABLE" in brief_text.upper() or "DATA UNAVAILABLE" in brief_text.upper():
+        if _is_unavailable_notice(brief_text):
             self.store.cache_delete(self.thread_id, f"brief:{ticker}")
             return {}
 
@@ -747,7 +746,15 @@ class ResearchSession:
         except ImportError:  # running outside Jupyter, e.g. a plain script
             print(markdown)
             return
-        display(Markdown(markdown))
+
+        # Escape bare dollar signs outside code blocks so MathJax does not treat
+        # currency figures as LaTeX math and collapse word spacing.
+        code_parts = re.split(r"(`+[^`]*`+)", markdown)
+        safe_markdown = "".join(
+            p if p.startswith("`") else re.sub(r"(?<!\\)\$", r"\$", p)
+            for p in code_parts
+        )
+        display(Markdown(safe_markdown))
 
 
 # ---------------------------------------------------------------------------
@@ -767,11 +774,23 @@ def _is_research_turn(kind: str) -> bool:
         return True
 
 
+def _is_unavailable_notice(text: str) -> bool:
+    """True if text is the short stub written when no data exists for a company.
+
+    Only the title line is checked: a full brief may mention that a specific metric
+    or multiple is unavailable in a table or paragraph without being the stub.
+    """
+    first_line = (text or "").strip().splitlines()[0].upper() if (text or "").strip() else ""
+    return first_line.lstrip().startswith("#") and (
+        "COVERAGE UNAVAILABLE" in first_line or "DATA UNAVAILABLE" in first_line
+    )
+
+
 def _produced_brief(state: Any) -> bool:
     """Return True if any brief-writing agent produced an actual research brief."""
     agents = getattr(state, "agents", None) or {}
     output = getattr(state, "output", "") or ""
-    if "COVERAGE UNAVAILABLE" in output.upper() or "DATA UNAVAILABLE" in output.upper():
+    if _is_unavailable_notice(output):
         return False
     return any(name in agents for name in _BRIEF_AGENTS)
 
