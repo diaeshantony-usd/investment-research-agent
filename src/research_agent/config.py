@@ -55,13 +55,28 @@ DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-oss:120b")
 # An OLLAMA_API_KEY set in the environment or a local .env file overrides this default.
 DEFAULT_API_KEY = os.getenv(
-    "OLLAMA_API_KEY", "19878a5a398b40c3aa12cf680fd6d6c1.VUB6r7DsyZxgZP1xgPvnRs4q"
+    "OLLAMA_API_KEY", "d34b4a2841ff4ca6b686467aac072147.eFT5LLlqAnj09mQRcUKmNdlV"
 )
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", None)
 DEFAULT_OPENAI_MODEL = os.getenv("DEFAULT_OPENAI_MODEL", "gpt-4o-mini")
+
+# Groq backup (OpenAI-compatible endpoint). When the default Ollama model fails (for example
+# its usage limit is reached), the same request is retried on Groq, which hosts the same
+# gpt-oss models. Set GROQ_API_KEY in the environment or in a local .env file (not committed)
+# to turn the backup on; without a key the app uses Ollama only.
+# Note: Groq's free plan allows 8k tokens per minute, enough for short questions but not
+# for every request of a full research brief.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+# The Groq client retries rate-limited requests (HTTP 429) this many times, with backoff.
+LLM_BACKUP_MAX_RETRIES = int(os.getenv("LLM_BACKUP_MAX_RETRIES", "5"))
+# After a failure, keep using the backup for this many seconds before trying Ollama again.
+LLM_FALLBACK_COOLDOWN_SECONDS = int(os.getenv("LLM_FALLBACK_COOLDOWN_SECONDS", "600"))
 
 # External Data API Keys (Free tiers / placeholders)
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "9fff59025e0b47d6b2fbb7eab8f74156")

@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import ollama
 import pytest
 
 from research_agent.interfaces import llm as llm_module
@@ -197,6 +198,27 @@ class TestOpenAILLM:
             "required": [],
         }
 
+    def test_schema_is_built_from_the_function_signature(self):
+        def delegate(task_description: str, top_k: int = 5) -> str:
+            """Delegate a task."""
+            return task_description
+
+        client = OpenAILLM.__new__(OpenAILLM)
+        params = client._extract_tool_callables({"delegate": delegate})[0]["function"]["parameters"]
+        assert params["properties"]["task_description"]["type"] == "string"
+        assert params["properties"]["top_k"]["type"] == "integer"
+        assert params["required"] == ["task_description"]  # top_k has a default
+
+    def test_agent_delegation_tool_exposes_task_description(self):
+        from research_agent.agent_framework import Agent
+
+        agent = Agent.__new__(Agent)
+        agent.name, agent.role = "EarningsAnalyst", "earnings"
+        tool = agent.as_tool()
+        client = OpenAILLM.__new__(OpenAILLM)
+        params = client._extract_tool_callables({tool.name: tool})[0]["function"]["parameters"]
+        assert params["required"] == ["task_description"]
+
     def test_chat_parses_json_tool_arguments(self, monkeypatch):
         message = SimpleNamespace(
             content="",
@@ -260,3 +282,157 @@ class TestGetLlm:
     def test_unsupported_provider_raises(self):
         with pytest.raises(ValueError, match="Unsupported LLM provider"):
             get_llm(provider="not-a-provider")
+
+
+# --------------------------------------------------------------------------- Groq backup
+
+
+class TestMessageConversion:
+    def _history(self):
+        assistant = ollama.Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ollama.Message.ToolCall(
+                    function=ollama.Message.ToolCall.Function(
+                        name="get_price", arguments={"ticker": "NVDA"}
+                    )
+                ),
+                ollama.Message.ToolCall(
+                    function=ollama.Message.ToolCall.Function(name="get_news", arguments={})
+                ),
+            ],
+        )
+        return [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Analyse NVDA"},
+            assistant,
+            {"role": "tool", "content": "182.4"},
+            {"role": "tool", "content": "headlines"},
+        ]
+
+    def test_ollama_history_becomes_valid_openai_messages(self):
+        out = llm_module._to_openai_messages(self._history())
+        calls = out[2]["tool_calls"]
+        assert [c["function"]["name"] for c in calls] == ["get_price", "get_news"]
+        assert calls[0]["function"]["arguments"] == '{"ticker": "NVDA"}'
+        # each tool result answers the call it belongs to, in order
+        assert out[3] == {"role": "tool", "tool_call_id": calls[0]["id"], "content": "182.4"}
+        assert out[4]["tool_call_id"] == calls[1]["id"]
+
+    def test_unanswered_calls_get_a_placeholder_result(self):
+        history = [*self._history()[:4], {"role": "user", "content": "go on"}]
+        out = llm_module._to_openai_messages(history)
+        assert out[4]["role"] == "tool"
+        assert out[4]["content"] == "(no result)"
+        assert out[5] == {"role": "user", "content": "go on"}
+
+    def test_tool_result_without_a_call_is_kept_as_text(self):
+        out = llm_module._to_openai_messages([{"role": "tool", "content": "x"}])
+        assert out == [{"role": "user", "content": "Tool result: x"}]
+
+    def test_openai_reply_objects_become_ollama_dicts(self):
+        reply = SimpleNamespace(
+            role="assistant",
+            content="",
+            tool_calls=[
+                SimpleNamespace(
+                    id="c1", function=SimpleNamespace(name="get_price", arguments='{"t": 1}')
+                )
+            ],
+        )
+        plain = {"role": "user", "content": "hi"}
+        out = llm_module._to_ollama_messages([plain, reply])
+        assert out[0] is plain
+        assert out[1] == {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "get_price", "arguments": {"t": 1}}}],
+        }
+
+    def test_openai_client_sends_converted_messages(self, monkeypatch):
+        fake = FakeOpenAIClient(
+            response=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=[]))]
+            )
+        )
+        monkeypatch.setattr(llm_module.openai, "OpenAI", lambda **_: fake)
+        OpenAILLM(model="m", api_key="k").chat(self._history())
+        sent = fake.last_kwargs["messages"]
+        assert sent[3]["tool_call_id"] == sent[2]["tool_calls"][0]["id"]
+
+
+class ScriptedLLM(LLM):
+    def __init__(self, model, error=None):
+        self.model = model
+        self.error = error
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return f"from {self.model}", [], None
+
+
+class TestFallbackLLM:
+    def test_uses_primary_while_it_works(self):
+        primary, backup = ScriptedLLM("ollama"), ScriptedLLM("groq")
+        client = llm_module.FallbackLLM(primary, backup, cooldown=60)
+        assert client.chat([])[0] == "from ollama"
+        assert backup.calls == 0
+
+    def test_failure_moves_the_request_to_the_backup_and_stays_there(self):
+        primary = ScriptedLLM("ollama", error=RuntimeError("429 usage limit"))
+        backup = ScriptedLLM("groq")
+        client = llm_module.FallbackLLM(primary, backup, cooldown=60)
+        assert client.chat([])[0] == "from groq"
+        assert client.chat([])[0] == "from groq"
+        assert primary.calls == 1  # not retried during the cooldown
+
+    def test_primary_is_tried_again_after_the_cooldown(self):
+        primary = ScriptedLLM("ollama", error=RuntimeError("down"))
+        client = llm_module.FallbackLLM(primary, ScriptedLLM("groq"), cooldown=0)
+        client.chat([])
+        primary.error = None
+        assert client.chat([])[0] == "from ollama"
+
+    def test_backup_error_is_raised_when_both_fail(self):
+        client = llm_module.FallbackLLM(
+            ScriptedLLM("ollama", error=RuntimeError("a")),
+            ScriptedLLM("groq", error=RuntimeError("b")),
+        )
+        with pytest.raises(RuntimeError, match="b"):
+            client.chat([])
+
+
+class TestGroqWiring:
+    def test_model_names_map_to_groq(self):
+        assert llm_module._groq_model_for("gpt-oss:120b") == "openai/gpt-oss-120b"
+        assert llm_module._groq_model_for("gpt-oss:20b") == "openai/gpt-oss-20b"
+        assert llm_module._groq_model_for("llama3") == llm_module.GROQ_MODEL
+
+    def test_default_provider_gets_the_groq_backup_when_a_key_is_set(self, monkeypatch):
+        monkeypatch.setattr(llm_module, "GROQ_API_KEY", "gsk-test")
+        monkeypatch.setattr(llm_module, "DEFAULT_LLM_PROVIDER", "ollama")
+        monkeypatch.setattr(llm_module.ollama, "Client", lambda host, headers: object())
+        monkeypatch.setattr(llm_module.openai, "OpenAI", lambda **_: object())
+        client = get_llm(model="gpt-oss:120b")
+        assert isinstance(client, llm_module.FallbackLLM)
+        assert isinstance(client.primary, OllamaLLM)
+        assert client.backup.model == "openai/gpt-oss-120b"
+        assert client.backup.base_url == llm_module.GROQ_BASE_URL
+
+    def test_no_backup_without_a_key_or_for_an_explicit_provider(self, monkeypatch):
+        monkeypatch.setattr(llm_module, "DEFAULT_LLM_PROVIDER", "ollama")
+        monkeypatch.setattr(llm_module.ollama, "Client", lambda host, headers: object())
+        monkeypatch.setattr(llm_module, "GROQ_API_KEY", "")
+        assert isinstance(get_llm(), OllamaLLM)
+        monkeypatch.setattr(llm_module, "GROQ_API_KEY", "gsk-test")
+        assert isinstance(get_llm(provider="ollama"), OllamaLLM)
+
+    def test_groq_provider(self, monkeypatch):
+        monkeypatch.setattr(llm_module.openai, "OpenAI", lambda **_: object())
+        client = get_llm(provider="groq")
+        assert isinstance(client, OpenAILLM)
+        assert client.base_url == llm_module.GROQ_BASE_URL
