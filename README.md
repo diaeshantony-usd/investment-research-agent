@@ -1,5 +1,9 @@
 # Investment Research Agent
 
+https://github.com/user-attachments/assets/01b3ecf5-5327-4ca6-95ef-e74cf1d1d5f1
+
+*Two-minute demo: the three specialist agents, the workflow patterns, the Critic's fact check and a live NVDA run in the Gradio app.*
+
 A multi-agent LLM system that researches a US-listed stock. You ask a question in plain English
 ("Analyse NVDA"). The system plans its research, fetches live data with tools, writes a
 five-section research brief, checks every figure in it against the raw data, fixes what fails,
