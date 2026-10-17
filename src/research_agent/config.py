@@ -55,7 +55,7 @@ DEFAULT_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "https://ollama.com")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-oss:120b")
 # An OLLAMA_API_KEY set in the environment or a local .env file overrides this default.
 DEFAULT_API_KEY = os.getenv(
-    "OLLAMA_API_KEY", "d34b4a2841ff4ca6b686467aac072147.eFT5LLlqAnj09mQRcUKmNdlV"
+    "OLLAMA_API_KEY", "41d8314a62ad4a28a1cd53d8f470aa3f.aAiQuiHqCDaFG3I0i202K0PS"
 )
 
 # OpenAI Configuration
